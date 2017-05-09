@@ -17,7 +17,7 @@ type Proposer interface {
 
 }
 
-func NewProposer() (Acceptor, error) {
+func NewProposer() (Proposer, error) {
 	return nil, nil
 }
 
