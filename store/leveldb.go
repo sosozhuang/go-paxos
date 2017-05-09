@@ -23,6 +23,7 @@ import (
 	"path"
 	"context"
 	"github.com/sosozhuang/paxos/comm"
+	"github.com/gogo/protobuf/proto"
 )
 
 var log = logger.PaxosLogger
@@ -98,17 +99,17 @@ func (ls *ldbs) GetMinChosenInstanceID(groupID comm.GroupID) (uint64, error) {
 func (ls *ldbs) ClearAllLog(groupID comm.GroupID) error {
 	return ls[groupID].ClearAllLog()
 }
-func (ls *ldbs) SetSystemVariables(groupID comm.GroupID, value []byte) error {
-	return ls[groupID].SetSystemVariables(value)
+func (ls *ldbs) SetSystemVariables(g comm.GroupID, v *comm.SystemVariables) error {
+	return ls[g].SetSystemVariables(v)
 }
-func (ls *ldbs) GetSystemVariables(groupID comm.GroupID) ([]byte, error) {
-	return ls[groupID].GetSystemVariables()
+func (ls *ldbs) GetSystemVariables(g comm.GroupID) (*comm.SystemVariables, error) {
+	return ls[g].GetSystemVariables()
 }
-func (ls *ldbs) SetMasterVariables(groupID comm.GroupID, value []byte) error {
-	return ls[groupID].SetMasterVariables(value)
+func (ls *ldbs) SetMasterVariables(g comm.GroupID, v *comm.MasterVariables) error {
+	return ls[g].SetMasterVariables(v)
 }
-func (ls *ldbs) GetMasterVariables(groupID comm.GroupID) ([]byte, error) {
-	return ls[groupID].GetMasterVariables()
+func (ls *ldbs) GetMasterVariables(g comm.GroupID) (*comm.MasterVariables, error) {
+	return ls[g].GetMasterVariables()
 }
 
 func newLevelDB(cfg *StorageConfig, dir string, comparer comparer.Comparer) (ldb *levelDB, err error) {
@@ -186,17 +187,45 @@ func (l *levelDB) GetMinChosenInstanceID(groupID comm.GroupID) (uint64, error) {
 func (l *levelDB) ClearAllLog(groupID comm.GroupID) error {
 	return nil
 }
-func (l *levelDB) SetSystemVariables(groupID comm.GroupID, value []byte) error {
-	return nil
+func (l *levelDB) SetSystemVariables(v *comm.SystemVariables) error {
+	key := strconv.Itoa(systemVariablesKey)
+	value, err := proto.Marshal(v)
+	if err != nil {
+		return err
+	}
+	return l.DB.Put(l.WriteOptions, key, value)
 }
-func (l *levelDB) GetSystemVariables(groupID comm.GroupID) ([]byte, error) {
-	return make([]byte, 0), nil
+func (l *levelDB) GetSystemVariables() (*comm.SystemVariables, error) {
+	key := strconv.Itoa(systemVariablesKey)
+	value, err := l.DB.Get(l.ReadOptions, key)
+	if err != nil {
+		return nil, err
+	}
+	v := &comm.SystemVariables{}
+	if err := proto.Unmarshal(value, v); err != nil {
+		return nil, err
+	}
+	return v, nil
 }
-func (l *levelDB) SetMasterVariables(groupID comm.GroupID, value []byte) error {
-	return nil
+func (l *levelDB) SetMasterVariables(v *comm.MasterVariables) error {
+	key := strconv.Itoa(masterVariablesKey)
+	value, err := proto.Marshal(v)
+	if err != nil {
+		return err
+	}
+	return l.DB.Put(l.WriteOptions, key, value)
 }
-func (l *levelDB) GetMasterVariables(groupID comm.GroupID) ([]byte, error) {
-	return make([]byte, 0), nil
+func (l *levelDB) GetMasterVariables() (*comm.MasterVariables, error) {
+	key := strconv.Itoa(masterVariablesKey)
+	value, err := l.DB.Get(l.ReadOptions, key)
+	if err != nil {
+		return nil, err
+	}
+	v := &comm.MasterVariables{}
+	if err := proto.Unmarshal(value, v); err != nil {
+		return nil, err
+	}
+	return v, nil
 }
 func (l *levelDB) Close() {
 	if l.DB != nil {
