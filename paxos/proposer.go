@@ -26,19 +26,21 @@ import (
 
 type proposalID uint64
 type msgType int
+type Reply func(*comm.PaxosMsg)
 type Proposer interface {
 	GetInstanceID() comm.InstanceID
 	NewValue([]byte) *comm.PaxosMsg
 }
 
-var log = logger.ProposerLogger
-
 const (
 	prepare msgType = iota
 	accept
+	prepareReply
+	acceptReply
 )
 
 const (
+	plog = logger.ProposerLogger
 	startPrepareDuration = time.Second * 2
 	startAcceptDuration  = time.Second
 	maxPrepareDuration   = time.Second * 8
@@ -58,8 +60,8 @@ func NewProposer(pd, ad time.Duration, learner Learner) (Proposer, error) {
 		receiveNodes:         make(map[comm.NodeID]bool),
 		rejectNodes:          make(map[comm.NodeID]bool),
 		promiseOrAcceptNodes: make(map[comm.NodeID]bool),
-		prepareReplies:       make(map[proposalID]func(*comm.PaxosMsg)),
-		acceptReplies:        make(map[proposalID]func(*comm.PaxosMsg)),
+		prepareReplies:       make(map[proposalID]Reply),
+		acceptReplies:        make(map[proposalID]Reply),
 	}, nil
 }
 
@@ -77,9 +79,9 @@ type proposer struct {
 	promiseOrAcceptNodes map[comm.NodeID]struct{}
 	mu                   sync.Mutex
 	prepareMu            sync.RWMutex
-	prepareReplies       map[proposalID]func(*comm.PaxosMsg)
+	prepareReplies       map[proposalID]Reply
 	acceptMu             sync.RWMutex
-	acceptReplies        map[proposalID]func(*comm.PaxosMsg)
+	acceptReplies        map[proposalID]Reply
 }
 
 func (p *proposer) isWorking() bool {
@@ -167,7 +169,7 @@ func (p *proposer) broadcastPrepareMessage(msg *comm.PaxosMsg) {
 	select {
 	case <-ctx.Done():
 		//timeout
-		log.Warning(ctx.Err())
+		plog.Warning(ctx.Err())
 		if p.prepareDuration < maxPrepareDuration {
 			p.prepareDuration *= 2
 		}
@@ -296,7 +298,7 @@ func (p *proposer) broadcastAcceptMessage(msg *comm.PaxosMsg) {
 	select {
 	case <-ctx.Done():
 		//timeout
-		log.Warning(ctx.Err())
+		plog.Warning(ctx.Err())
 		if p.acceptDuration < maxAcceptDuration {
 			p.acceptDuration *= 2
 		}
