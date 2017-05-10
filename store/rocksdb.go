@@ -131,7 +131,7 @@ func (rs *rdbs) Set(groupID comm.GroupID, instanceID comm.InstanceID, value []by
 func (rs *rdbs) Delete(groupID comm.GroupID, instanceID comm.InstanceID, opts *DeleteOptions) error {
 	return rs[groupID].Delete(instanceID, opts)
 }
-func (rs *rdbs) GetMaxInstanceID(groupID comm.GroupID) (uint64, error) {
+func (rs *rdbs) GetMaxInstanceID(groupID comm.GroupID) (comm.InstanceID, error) {
 	return rs[groupID].GetMaxInstanceID()
 }
 func (rs *rdbs) SetMinChosenInstanceID(groupID comm.GroupID, instanceID comm.InstanceID, opts *SetOptions) error {
@@ -221,8 +221,21 @@ func (r *rocksDB) Set(instanceID comm.InstanceID, value []byte, opts *SetOptions
 func (r *rocksDB) Delete(instanceID comm.InstanceID, opts *DeleteOptions) error {
 	return nil
 }
-func (r *rocksDB) GetMaxInstanceID() (uint64, error) {
-	return uint64(0), nil
+func (r *rocksDB) GetMaxInstanceID() (comm.InstanceID, error) {
+	it := r.NewIterator(r.ReadOptions)
+	defer it.Close()
+	for it.SeekToLast(); it.Valid(); it.Prev() {
+		id, err := strconv.ParseInt(string(it.Key()), 10, 64)
+		if err != nil {
+			return comm.InstanceID(0), err
+		}
+		if id != minChosenKey &&
+			id != systemVariablesKey &&
+			id != masterVariablesKey {
+			return id, nil
+		}
+	}
+	return comm.InstanceID(0), nil
 }
 func (r *rocksDB) SetMinChosenInstanceID(instanceID comm.InstanceID, opts *SetOptions) error {
 	return nil

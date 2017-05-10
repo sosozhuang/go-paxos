@@ -87,7 +87,7 @@ func (ls *ldbs) Set(groupID comm.GroupID, instanceID comm.InstanceID, value []by
 func (ls *ldbs) Delete(groupID comm.GroupID, instanceID comm.InstanceID, opts *DeleteOptions) error {
 	return ls[groupID].Delete(instanceID, opts)
 }
-func (ls *ldbs) GetMaxInstanceID(groupID comm.GroupID) (uint64, error) {
+func (ls *ldbs) GetMaxInstanceID(groupID comm.GroupID) (comm.InstanceID, error) {
 	return ls[groupID].GetMaxInstanceID()
 }
 func (ls *ldbs) SetMinChosenInstanceID(groupID comm.GroupID, instanceID comm.InstanceID, opts *SetOptions) error {
@@ -175,8 +175,21 @@ func (l *levelDB) Set(groupID comm.GroupID, instanceID comm.InstanceID, value []
 func (l *levelDB) Delete(groupID comm.GroupID, instanceID comm.InstanceID, opts *DeleteOptions) error {
 	return nil
 }
-func (l *levelDB) GetMaxInstanceID(groupID comm.GroupID) (uint64, error) {
-	return uint64(0), nil
+func (l *levelDB) GetMaxInstanceID() (comm.InstanceID, error) {
+	it := l.NewIterator(nil, l.ReadOptions)
+	defer it.Release()
+	for it.Last(); it.Valid(); it.Prev() {
+		id, err := strconv.ParseInt(string(it.Key()), 10, 64)
+		if err != nil {
+			return comm.InstanceID(0), err
+		}
+		if id != minChosenKey &&
+			id != systemVariablesKey &&
+			id != masterVariablesKey {
+			return id, nil
+		}
+	}
+	return comm.InstanceID(0), nil
 }
 func (l *levelDB) SetMinChosenInstanceID(groupID comm.GroupID, instanceID comm.InstanceID, opts *SetOptions) error {
 	return nil
