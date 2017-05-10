@@ -16,22 +16,72 @@ package paxos
 import (
 	"github.com/sosozhuang/paxos/checkpoint"
 	"github.com/sosozhuang/paxos/comm"
+	"time"
+	"errors"
+	"github.com/sosozhuang/paxos/node"
 )
 
+const (
+	maxValueLength = 1024 * 1024 * 1024
+)
 type Instance interface {
+	NewInstance()
 	GetCurrentInstanceID() comm.InstanceID
 	HandleMessage([]byte, int) error
-	Committer
 	Cleaner() checkpoint.Cleaner
 	Replayer() checkpoint.Replayer
 }
 
 func NewInstance() (Instance, error) {
-	return &instance{}, nil
+	return &instance{
+		ch: make(chan []byte, 100),
+	}, nil
 }
 
 type instance struct {
+	group node.Group
 	proposer Proposer
 	acceptor Acceptor
 	learner Learner
+	ch chan []byte
+}
+
+func (i *instance) NewInstance() {
+	i.proposer.NewInstance()
+	i.acceptor.NewInstance()
+	i.learner.NewInstance()
+}
+
+func (i *instance) OnReceive(message []byte) error {
+	select {
+	case i.ch <- message:
+		return nil
+	case time.After(time.Second * 3):
+		return errors.New("time out")
+	}
+}
+
+func (i *instance) CheckNewValue() {
+	for value := range i.ch {
+		if !i.learner.isIMLast() {
+			break
+		}
+
+		if !i.group.CheckMemberShip() {
+			break
+		}
+
+		if len(value) > maxValueLength &&
+			(i.proposer.GetInstanceID() == 0 || ) {
+			break
+		}
+
+		if i.group.IsUseMembership() {
+
+		} else {
+			msg := i.proposer.NewValue(value)
+			// todo: send to acceptor and remote
+		}
+
+	}
 }
