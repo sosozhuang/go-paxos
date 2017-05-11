@@ -122,6 +122,13 @@ func (r *rdbs) Close() {
 	}
 }
 
+func (rs *rdbs) GetStorage(groupID comm.GroupID) (Storage, error) {
+	if groupID < 0 || groupID >= len(rs) {
+		return nil, errors.New("")
+	}
+	return rs[groupID]
+}
+
 func (rs *rdbs) Get(groupID comm.GroupID, instanceID comm.InstanceID) ([]byte, error) {
 	return rs[groupID].Get(instanceID)
 }

@@ -78,6 +78,13 @@ func (ls *ldbs) Close() {
 	}
 }
 
+func (ls *ldbs) GetStorage(groupID comm.GroupID) (Storage, error) {
+	if groupID < 0 || groupID >= len(ls) {
+		return nil, errors.New("")
+	}
+	return ls[groupID]
+}
+
 func (ls *ldbs) Get(groupID comm.GroupID, instanceID comm.InstanceID) ([]byte, error) {
 	return ls[groupID].Get(instanceID)
 }
