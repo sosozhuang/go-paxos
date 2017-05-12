@@ -218,6 +218,9 @@ func (l *levelDB) SetSystemVariables(v *comm.SystemVariables) error {
 func (l *levelDB) GetSystemVariables() (*comm.SystemVariables, error) {
 	key := strconv.Itoa(systemVariablesKey)
 	value, err := l.DB.Get(l.ReadOptions, key)
+	if err == leveldb.ErrNotFound {
+		return nil, ErrNotFound
+	}
 	if err != nil {
 		return nil, err
 	}
@@ -238,6 +241,9 @@ func (l *levelDB) SetMasterVariables(v *comm.MasterVariables) error {
 func (l *levelDB) GetMasterVariables() (*comm.MasterVariables, error) {
 	key := strconv.Itoa(masterVariablesKey)
 	value, err := l.DB.Get(l.ReadOptions, key)
+	if err == leveldb.ErrNotFound {
+		return nil, ErrNotFound
+	}
 	if err != nil {
 		return nil, err
 	}

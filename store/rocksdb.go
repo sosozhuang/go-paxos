@@ -267,6 +267,10 @@ func (r *rocksDB) GetSystemVariables() (*comm.SystemVariables, error) {
 	if err != nil {
 		return nil, err
 	}
+	defer value.Free()
+	if value.Size() == 0 {
+		return nil, ErrNotFound
+	}
 	v := &comm.SystemVariables{}
 	if err := proto.Unmarshal(value.Data(), v); err != nil {
 		return nil, err
@@ -286,6 +290,10 @@ func (r *rocksDB) GetMasterVariables() (*comm.MasterVariables, error) {
 	value, err := r.DB.Get(r.ReadOptions, key)
 	if err != nil {
 		return nil, err
+	}
+	defer value.Free()
+	if value.Size() == 0 {
+		return nil, ErrNotFound
 	}
 	v := &comm.MasterVariables{}
 	if err := proto.Unmarshal(value.Data(), v); err != nil {
