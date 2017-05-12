@@ -14,20 +14,23 @@
 package paxos
 
 import (
-	"github.com/sosozhuang/paxos/comm"
-	"hash/crc32"
 	"github.com/gogo/protobuf/proto"
-	"github.com/sosozhuang/paxos/store"
+	"github.com/sosozhuang/paxos/comm"
 	"github.com/sosozhuang/paxos/logger"
+	"github.com/sosozhuang/paxos/store"
+	"hash/crc32"
 )
 
 const (
-	alog = logger.AcceptorLogger
-	crcTable   = crc32.MakeTable(crc32.Castagnoli)
+	alog     = logger.AcceptorLogger
+	crcTable = crc32.MakeTable(crc32.Castagnoli)
 )
 
 type Acceptor interface {
-
+	NewInstance()
+	GetInstanceID() comm.InstanceID
+	onPrepare(*comm.PaxosMsg)
+	onAccept(*comm.PaxosMsg)
 }
 
 func NewAcceptor() (Acceptor, error) {
@@ -35,16 +38,17 @@ func NewAcceptor() (Acceptor, error) {
 }
 
 type acceptor struct {
-	state *acceptorState
+	state      *acceptorState
+	nodeID     comm.NodeID
 	instanceID comm.InstanceID
 }
 
 func (a *acceptor) onPrepare(msg *comm.PaxosMsg) error {
 	replyMsg := &comm.PaxosMsg{
+		Type:    comm.PaxosMsgType_PrepareReply.Enum(),
 		InstanceID: proto.Uint64(a.instanceID),
-		NodeID: proto.Uint64(0),
+		NodeID:     proto.Uint64(a.nodeID),
 		ProposalID: proto.Uint64(msg.ProposalID),
-		MsgType: proto.Int32(prepareReply),
 	}
 	b := ballot{msg.GetProposalID(), msg.GetProposalNodeID()}
 	if b.ge(a.state.promisedBallot) {
@@ -66,10 +70,10 @@ func (a *acceptor) onPrepare(msg *comm.PaxosMsg) error {
 
 func (a *acceptor) onAccept(msg *comm.PaxosMsg) error {
 	replyMsg := &comm.PaxosMsg{
+		Type:    comm.PaxosMsgType_AcceptReply.Enum(),
 		InstanceID: proto.Uint64(a.instanceID),
-		NodeID: proto.Uint64(0),
+		NodeID:     proto.Uint64(a.nodeID),
 		ProposalID: proto.Uint64(msg.ProposalID),
-		MsgType: proto.Int32(acceptReply),
 	}
 	b := ballot{msg.GetProposalID(), msg.GetProposalNodeID()}
 	if b.ge(a.state.promisedBallot) {
@@ -90,9 +94,9 @@ func (a *acceptor) onAccept(msg *comm.PaxosMsg) error {
 type acceptorState struct {
 	promisedBallot ballot
 	acceptedBallot ballot
-	value []byte
-	checksum uint32
-	storage store.MultiGroupStorage
+	value          []byte
+	checksum       uint32
+	storage        store.Storage
 }
 
 func (a *acceptorState) save(instanceID comm.InstanceID, checksum uint32) error {
@@ -103,13 +107,13 @@ func (a *acceptorState) save(instanceID comm.InstanceID, checksum uint32) error 
 	}
 
 	state := &comm.AcceptorStateData{
-		InstanceID: proto.Uint64(instanceID),
-		PromiseID: proto.Uint64(a.promisedBallot.proposalID),
-		PromiseNodeID: proto.Uint64(a.promisedBallot.nodeID),
-		AcceptedID: proto.Uint64(a.acceptedBallot.proposalID),
+		InstanceID:     proto.Uint64(instanceID),
+		PromisedID:      proto.Uint64(a.promisedBallot.proposalID),
+		PromisedNodeID:  proto.Uint64(a.promisedBallot.nodeID),
+		AcceptedID:     proto.Uint64(a.acceptedBallot.proposalID),
 		AcceptedNodeID: proto.Uint64(a.acceptedBallot.nodeID),
-		AcceptedValue: a.value,
-		Checksum: proto.Uint32(a.checksum),
+		AcceptedValue:  a.value,
+		Checksum:       proto.Uint32(a.checksum),
 	}
 
 	b, err := proto.Marshal(state)
@@ -121,12 +125,11 @@ func (a *acceptorState) save(instanceID comm.InstanceID, checksum uint32) error 
 }
 
 func (a *acceptorState) load() (comm.InstanceID, error) {
-	groupID := 0
-	instanceID, err := a.storage.GetMaxInstanceID(groupID)
+	instanceID, err := a.storage.GetMaxInstanceID()
 	if err != nil {
 		return instanceID, err
 	}
-	b, err := a.storage.Get(groupID, instanceID)
+	b, err := a.storage.Get(instanceID)
 	if err != nil {
 		return instanceID, err
 	}
@@ -134,8 +137,8 @@ func (a *acceptorState) load() (comm.InstanceID, error) {
 	if err = proto.Unmarshal(b, state); err != nil {
 		return instanceID, err
 	}
-	a.promisedBallot.proposalID = state.GetPromiseID()
-	a.promisedBallot.nodeID = state.GetPromiseNodeID()
+	a.promisedBallot.proposalID = state.GetPromisedID()
+	a.promisedBallot.nodeID = state.GetPromisedNodeID()
 	a.acceptedBallot.proposalID = state.GetAcceptedID()
 	a.acceptedBallot.nodeID = state.GetAcceptedNodeID()
 	a.value = state.GetAcceptedValue()
