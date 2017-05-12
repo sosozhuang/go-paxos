@@ -198,17 +198,40 @@ func (l *levelDB) GetMaxInstanceID() (comm.InstanceID, error) {
 	}
 	return comm.InstanceID(0), nil
 }
-func (l *levelDB) SetMinChosenInstanceID(groupID comm.GroupID, instanceID comm.InstanceID, opts *SetOptions) error {
-	return nil
+func (l *levelDB) SetMinChosenInstanceID(instanceID comm.InstanceID, opts *SetOptions) error {
+	key, err := comm.IntToBytes(minChosenKey)
+	if err != nil {
+		return err
+	}
+	value, err := comm.ObjectToBytes(instanceID)
+	if err != nil {
+		return err
+	}
+	return l.DB.Put(l.WriteOptions, key, value)
 }
-func (l *levelDB) GetMinChosenInstanceID(groupID comm.GroupID) (uint64, error) {
-	return uint64(0), nil
+func (l *levelDB) GetMinChosenInstanceID() (comm.InstanceID, error) {
+	key, err := comm.IntToBytes(minChosenKey)
+	if err != nil {
+		return comm.InstanceID(0), err
+	}
+	value, err := l.DB.Get(key, l.ReadOptions)
+	if err != nil {
+		return comm.InstanceID(0), err
+	}
+	var instanceID comm.InstanceID
+	if err = comm.BytesToObject(value, &instanceID); err != nil {
+		return comm.InstanceID(0), err
+	}
+	return instanceID, nil
 }
 func (l *levelDB) ClearAllLog(groupID comm.GroupID) error {
 	return nil
 }
 func (l *levelDB) SetSystemVariables(v *comm.SystemVariables) error {
-	key := strconv.Itoa(systemVariablesKey)
+	key, err := comm.IntToBytes(systemVariablesKey)
+	if err != nil {
+		return err
+	}
 	value, err := proto.Marshal(v)
 	if err != nil {
 		return err
@@ -216,7 +239,10 @@ func (l *levelDB) SetSystemVariables(v *comm.SystemVariables) error {
 	return l.DB.Put(l.WriteOptions, key, value)
 }
 func (l *levelDB) GetSystemVariables() (*comm.SystemVariables, error) {
-	key := strconv.Itoa(systemVariablesKey)
+	key, err := comm.IntToBytes(systemVariablesKey)
+	if err != nil {
+		return nil, err
+	}
 	value, err := l.DB.Get(l.ReadOptions, key)
 	if err == leveldb.ErrNotFound {
 		return nil, ErrNotFound
@@ -231,7 +257,10 @@ func (l *levelDB) GetSystemVariables() (*comm.SystemVariables, error) {
 	return v, nil
 }
 func (l *levelDB) SetMasterVariables(v *comm.MasterVariables) error {
-	key := strconv.Itoa(masterVariablesKey)
+	key, err := comm.IntToBytes(masterVariablesKey)
+	if err != nil {
+		return err
+	}
 	value, err := proto.Marshal(v)
 	if err != nil {
 		return err
@@ -239,7 +268,10 @@ func (l *levelDB) SetMasterVariables(v *comm.MasterVariables) error {
 	return l.DB.Put(l.WriteOptions, key, value)
 }
 func (l *levelDB) GetMasterVariables() (*comm.MasterVariables, error) {
-	key := strconv.Itoa(masterVariablesKey)
+	key, err := comm.IntToBytes(masterVariablesKey)
+	if err != nil {
+		return nil, err
+	}
 	value, err := l.DB.Get(l.ReadOptions, key)
 	if err == leveldb.ErrNotFound {
 		return nil, ErrNotFound
