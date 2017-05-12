@@ -14,42 +14,75 @@
 package paxos
 
 import (
+	"errors"
+	"github.com/gogo/protobuf/proto"
 	"github.com/sosozhuang/paxos/checkpoint"
 	"github.com/sosozhuang/paxos/comm"
-	"time"
-	"errors"
+	"github.com/sosozhuang/paxos/logger"
 	"github.com/sosozhuang/paxos/node"
+	"github.com/sosozhuang/paxos/store"
+	"time"
 )
 
 const (
-	maxValueLength = 1024 * 1024 * 1024
+	log = logger.PaxosLogger
 )
+
 type Instance interface {
 	NewInstance()
 	GetCurrentInstanceID() comm.InstanceID
+	IsIMLast() bool
+	GetAcceptor() Acceptor
+	GetLearner() Learner
+	GetProposer() Proposer
+	NewValue([]byte)
 	HandleMessage([]byte, int) error
 	Cleaner() checkpoint.Cleaner
 	Replayer() checkpoint.Replayer
+	AddStateMachine(...node.StateMachine)
+	ReceivePaxosMessage(*comm.PaxosMsg)
+	ReceiveCheckpointMessage(*comm.CheckpointMsg)
 }
 
-func NewInstance() (Instance, error) {
+func NewInstance(tp Transporter, st store.Storage) (Instance, error) {
+	a, err := NewAcceptor()
+	if err != nil {
+		return nil, err
+	}
+	l, err := NewLearner()
+	if err != nil {
+		return nil, err
+	}
+	p, err := NewProposer()
+	if err != nil {
+		return nil, err
+	}
 	return &instance{
-		ch: make(chan []byte, 100),
+		proposer: p,
+		acceptor: a,
+		learner:  l,
+		ch:       make(chan []byte, 100),
+		sms:      make(map[comm.StateMachineID]node.StateMachine),
 	}, nil
 }
 
 type instance struct {
-	group node.Group
+	group    node.Group
 	proposer Proposer
 	acceptor Acceptor
-	learner Learner
-	ch chan []byte
+	learner  Learner
+	ch       chan []byte
+	sms      map[comm.StateMachineID]node.StateMachine
 }
 
 func (i *instance) NewInstance() {
 	i.proposer.NewInstance()
 	i.acceptor.NewInstance()
-	i.learner.NewInstance()
+	i.learner.newInstance()
+}
+
+func (i *instance) NewValue(value []byte) {
+	i.proposer.NewValue(value)
 }
 
 func (i *instance) OnReceive(message []byte) error {
@@ -71,10 +104,10 @@ func (i *instance) CheckNewValue() {
 			break
 		}
 
-		if len(value) > maxValueLength &&
-			(i.proposer.GetInstanceID() == 0 || ) {
-			break
-		}
+		//if len(value) > maxValueLength &&
+		//	(i.proposer.GetInstanceID() == 0 || ) {
+		//	break
+		//}
 
 		if i.group.IsUseMembership() {
 
@@ -83,5 +116,94 @@ func (i *instance) CheckNewValue() {
 			// todo: send to acceptor and remote
 		}
 
+	}
+}
+
+func (i *instance) AddStateMachine(sms ...node.StateMachine) {
+	for _, sm := range sms {
+		if _, ok := i.sms[sm.GetStateMachineID()]; !ok {
+			i.sms[sm.GetStateMachineID()] = sm
+		}
+	}
+}
+
+func (i *instance) ReceivePaxosMessage(msg *comm.PaxosMsg) {
+	switch msg.GetType() {
+	case comm.PaxosMsgType_NewValue:
+	case comm.PaxosMsgType_PrepareReply:
+		if msg.GetInstanceID() != i.proposer.GetInstanceID() {
+			log.Info("instance not equal.")
+			return
+		}
+		i.proposer.OnPrepareReply(msg)
+	case comm.PaxosMsgType_AcceptReply:
+		if msg.GetInstanceID() != i.proposer.GetInstanceID() {
+			log.Info("instance not equal.")
+			return
+		}
+		i.proposer.OnAcceptReply(msg)
+
+	case comm.PaxosMsgType_Prepare:
+		if msg.GetInstanceID() == i.acceptor.GetInstanceID()+1 {
+			m := *msg
+			m.InstanceID = proto.Uint64(i.acceptor.GetInstanceID())
+			m.Type = comm.PaxosMsgType_ProposalFinished.Enum()
+			i.ReceivePaxosMessage(&m)
+		}
+		if msg.GetInstanceID() == i.acceptor.GetInstanceID() {
+			i.acceptor.onPrepare(msg)
+		} else if msg.GetInstanceID() > i.acceptor.GetInstanceID() {
+
+		}
+
+	case comm.PaxosMsgType_Accept:
+		if msg.GetInstanceID() == i.acceptor.GetInstanceID()+1 {
+			m := *msg
+			m.InstanceID = proto.Uint64(i.acceptor.GetInstanceID())
+			m.Type = comm.PaxosMsgType_ProposalFinished.Enum()
+			i.ReceivePaxosMessage(&m)
+		}
+		if msg.GetInstanceID() == i.acceptor.GetInstanceID() {
+			i.acceptor.onAccept(msg)
+		} else if msg.GetInstanceID() > i.acceptor.GetInstanceID() {
+
+		}
+
+	case comm.PaxosMsgType_AskForLearn:
+		i.learner.onAskForLearn(msg)
+		if i.learner.isLearned() {
+			i.NewInstance()
+		}
+	case comm.PaxosMsgType_ConfirmAskForLearn:
+		i.learner.onConfirmAskForLearn(msg)
+		i.NewInstance()
+	case comm.PaxosMsgType_ProposalFinished:
+		i.learner.onProposalFinished(msg)
+		i.NewInstance()
+	case comm.PaxosMsgType_SendValue:
+		i.learner.onSendValue(msg)
+		i.NewInstance()
+	case comm.PaxosMsgType_SendInstanceID:
+		i.learner.onSendInstanceID(msg)
+		i.NewInstance()
+	case comm.PaxosMsgType_AckSendValue:
+		i.learner.onAckSendValue(msg)
+		i.NewInstance()
+	case comm.PaxosMsgType_AskForCheckpoint:
+		i.learner.onAskForCheckpoint(msg)
+		i.NewInstance()
+	default:
+		log.Errorf("Unknown paxos message type %v.\n", msg.GetType())
+		return
+	}
+}
+
+func (i *instance) ReceiveCheckpointMessage(msg *comm.CheckpointMsg) {
+	switch msg.GetType() {
+	case comm.CheckpointMsgType_SendFile:
+	case comm.CheckpointMsgType_AckSendFile:
+	default:
+		log.Errorf("Unknown checkpoint message type %v.\n", msg.GetType())
+		return
 	}
 }
