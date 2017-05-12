@@ -21,6 +21,16 @@ import (
 )
 
 type Learner interface {
+	newInstance()
+	onAskForLearn(*comm.PaxosMsg)
+	onConfirmAskForLearn(*comm.PaxosMsg)
+	onProposalFinished(*comm.PaxosMsg)
+	onSendValue(*comm.PaxosMsg)
+	onAckSendValue(*comm.PaxosMsg)
+	onSendInstanceID(*comm.PaxosMsg)
+	onAskForCheckpoint(*comm.PaxosMsg)
+	proposalFinished(comm.InstanceID, proposalID)
+	isLearned() bool
 	isIMLast() bool
 }
 
@@ -30,6 +40,33 @@ func NewLearner() (Learner, error) {
 
 type learner struct {
 	state *learnerState
+	acceptor Acceptor
+	learning bool
+	nodeID comm.NodeID
+	instanceID comm.InstanceID
+	lastAckInstanceID comm.InstanceID
+	lastSeenInstanceID comm.InstanceID
+	lastSeenNodeID comm.NodeID
+	tp Transporter
+}
+
+func (l *learner) SetLastSeenInstance(instanceID comm.InstanceID, nodeID comm.NodeID) {
+	if instanceID > l.lastSeenInstanceID {
+		l.lastSeenInstanceID = instanceID
+		l.lastSeenNodeID = nodeID
+	}
+
+}
+
+func (l *learner) proposalFinished(instanceID comm.InstanceID, proposalID proposalID) {
+	msg := &comm.PaxosMsg{
+		Type: comm.PaxosMsgType_ProposalFinished.Enum(),
+		InstanceID: proto.Uint64(instanceID),
+		NodeID: proto.Uint64(l.nodeID),
+		ProposalID: proto.Uint64(proposalID),
+		LastChecksum: proto.Uint32(0),
+	}
+	l.tp.Broadcast(msg, localFirst)
 }
 
 type learnerState struct {
