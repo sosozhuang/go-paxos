@@ -13,24 +13,79 @@
 // limitations under the License.
 package paxos
 
-import "github.com/sosozhuang/paxos/comm"
-
+import (
+	"github.com/sosozhuang/paxos/comm"
+	"github.com/gogo/protobuf/proto"
+	"hash/crc32"
+)
+type broadcastType int
+const (
+	localFirst broadcastType = iota
+	remoteFirst
+	remoteOnly
+)
+var crcTable = crc32.MakeTable(crc32.Castagnoli)
 type Transporter interface {
 	Send()
-	Broadcast()
+	Broadcast(comm.PaxosMsg, broadcastType)
 	BroadcastToFollower()
 }
 
+func NewTransport() (Transporter, error) {
+	return nil, nil
+}
+
 type transporter struct {
-	network comm.NetWork
+	nodeID comm.NodeID
+	groupID comm.GroupID
+	sender comm.Sender
 }
 
 func (t *transporter) Send() {
+	t.sender.SendMessage()
+}
 
+func (t *transporter) pack(msgType comm.MsgType, pb proto.Message) ([]byte, error) {
+	header := &comm.Header{
+		ClusterID: proto.Uint64(0),
+		Type: msgType.Enum(),
+		Version: proto.Int32(1),
+	}
+	b, err := comm.ObjectToBytes(t.groupID)
+	if err != nil {
+		return nil, err
+	}
+	h, err := proto.Marshal(header)
+	if err != nil {
+		return nil, err
+	}
+	l, err := comm.IntToBytes(len(h))
+	if err != nil {
+		return nil, err
+	}
+	b = append(b, l...)
+	b = append(b, h...)
+	m, err := proto.Marshal(pb)
+	if err != nil {
+		return nil, err
+	}
+	l, err = comm.IntToBytes(len(m))
+	if err != nil {
+		return nil, err
+	}
+	b = append(b, l...)
+	b = append(b, m...)
+	checksum := crc32.Update(0, crcTable, b)
+	l, err = comm.ObjectToBytes(checksum)
+	if err != nil {
+		return nil, err
+	}
+	b = append(b, l...)
+	return b, nil
 }
 
 func (t *transporter) Broadcast() {
-
+	t.sender.SendMessage()
 }
 
 func (t *transporter) BoradcastToFollower() {
