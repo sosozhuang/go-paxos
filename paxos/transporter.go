@@ -24,20 +24,19 @@ const (
 	remoteFirst
 	remoteOnly
 )
-var crcTable = crc32.MakeTable(crc32.Castagnoli)
+
 type Transporter interface {
 	Send()
 	Broadcast(comm.PaxosMsg, broadcastType)
 	BroadcastToFollower()
 }
 
-func NewTransport() (Transporter, error) {
+func NewTransporter() (Transporter, error) {
 	return nil, nil
 }
 
 type transporter struct {
 	nodeID comm.NodeID
-	groupID comm.GroupID
 	sender comm.Sender
 }
 
@@ -45,13 +44,13 @@ func (t *transporter) Send() {
 	t.sender.SendMessage()
 }
 
-func (t *transporter) pack(msgType comm.MsgType, pb proto.Message) ([]byte, error) {
+func (t *transporter) pack(groupID comm.GroupID, msgType comm.MsgType, pb proto.Message) ([]byte, error) {
 	header := &comm.Header{
 		ClusterID: proto.Uint64(0),
 		Type: msgType.Enum(),
 		Version: proto.Int32(1),
 	}
-	b, err := comm.ObjectToBytes(t.groupID)
+	b, err := comm.ObjectToBytes(groupID)
 	if err != nil {
 		return nil, err
 	}
@@ -88,6 +87,6 @@ func (t *transporter) Broadcast() {
 	t.sender.SendMessage()
 }
 
-func (t *transporter) BoradcastToFollower() {
+func (t *transporter) BroadcastToFollower() {
 
 }
