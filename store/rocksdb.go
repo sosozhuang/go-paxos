@@ -23,11 +23,14 @@ import (
 	"context"
 	"sync"
 	"github.com/gogo/protobuf/proto"
+	"os"
+	"github.com/syndtr/goleveldb/leveldb"
 )
 
 type rdbs []*rocksDB
 
 type rocksDB struct {
+	dir string
 	*StorageConfig
 	*gorocksdb.DB
 	*gorocksdb.Options
@@ -148,7 +151,7 @@ func (rs *rdbs) GetMinChosenInstanceID(groupID comm.GroupID) (uint64, error) {
 	return rs[groupID].GetMinChosenInstanceID()
 }
 func (rs *rdbs) ClearAllLog(groupID comm.GroupID) error {
-	return rs[groupID].ClearAllLog()
+	return rs[groupID].Recreate()
 }
 func (rs *rdbs) SetSystemVariables(g comm.GroupID, v *comm.SystemVariables) error {
 	return rs[g].SetSystemVariables(v)
@@ -218,6 +221,10 @@ func (r *rocksDB) Open(ctx context.Context, stopped <-chan struct{}) error {
 	}
 }
 
+func (r *rocksDB) GetDir() string{
+	return r.dir
+}
+
 func (r *rocksDB) Get(instanceID comm.InstanceID) ([]byte, error) {
 	return make([]byte, 0), nil
 }
@@ -245,25 +252,88 @@ func (r *rocksDB) GetMaxInstanceID() (comm.InstanceID, error) {
 	return comm.InstanceID(0), nil
 }
 func (r *rocksDB) SetMinChosenInstanceID(instanceID comm.InstanceID, opts *SetOptions) error {
+	value, err := comm.ObjectToBytes(instanceID)
+	if err != nil {
+		return err
+	}
+	return r.DB.Put(r.WriteOptions, minChosenKey, value)
+}
+func (r *rocksDB) GetMinChosenInstanceID() (comm.InstanceID, error) {
+	var instanceID comm.InstanceID
+	value, err := r.DB.Get(r.ReadOptions, minChosenKey)
+	if err != nil {
+		return instanceID, err
+	}
+	defer value.Free()
+	if value.Size() == 0 {
+		return instanceID, nil
+	}
+	if value.Size() == 12 {
+		v, err := r.Get(minChosenKey)
+		if err == ErrNotFound {
+			return instanceID, nil
+		}
+		if err != nil {
+			return instanceID, err
+		}
+		if err = comm.BytesToObject(v, &instanceID); err != nil {
+			return instanceID, err
+		}
+		return instanceID, nil
+	}
+	if err = comm.BytesToObject(value.Data(), &instanceID); err != nil {
+		return instanceID, err
+	}
+	return instanceID, nil
+}
+func (r *rocksDB) Recreate() error {
+	sv, err := r.GetSystemVariables()
+	if err != nil && err != ErrNotFound {
+		return err
+	}
+	mv, err := r.GetMasterVariables()
+	if err != nil && err != ErrNotFound {
+		return err
+	}
+	backup := path.Clean(r.dir) + ".bak"
+	if err = os.RemoveAll(backup); err != nil && !os.IsNotExist(err) {
+		return err
+	}
+	if err = os.Rename(r.dir, backup); err != nil {
+		return err
+	}
+
+	r.closeDB()
+	r.DB, err = gorocksdb.OpenDb(r.Options, r.dir)
+	if err != nil {
+		return err
+	}
+	r.logStore, err = newLogStore(r.dir, r)
+	if err != nil {
+		return err
+	}
+
+	if sv != nil {
+		if err = r.SetSystemVariables(sv); err != nil {
+			return err
+		}
+	}
+	if mv != nil {
+		if err = r.SetMasterVariables(mv); err != nil {
+			return err
+		}
+	}
 	return nil
 }
-func (r *rocksDB) GetMinChosenInstanceID() (uint64, error) {
-	return uint64(0), nil
-}
-func (r *rocksDB) ClearAllLog() error {
-	return nil
-}
-func (r *rocksDB) SetSystemVariables(v []byte) error {
-	key := strconv.Itoa(systemVariablesKey)
+func (r *rocksDB) SetSystemVariables(v *comm.SystemVariables) error {
 	value, err := proto.Marshal(v)
 	if err != nil {
 		return err
 	}
-	return r.DB.Put(r.WriteOptions, key, value)
+	return r.DB.Put(r.WriteOptions, systemVariablesKey, value)
 }
 func (r *rocksDB) GetSystemVariables() (*comm.SystemVariables, error) {
-	key := strconv.Itoa(systemVariablesKey)
-	value, err := r.DB.Get(r.ReadOptions, key)
+	value, err := r.DB.Get(r.ReadOptions, systemVariablesKey)
 	if err != nil {
 		return nil, err
 	}
@@ -278,16 +348,14 @@ func (r *rocksDB) GetSystemVariables() (*comm.SystemVariables, error) {
 	return v, nil
 }
 func (r *rocksDB) SetMasterVariables(v *comm.MasterVariables) error {
-	key := strconv.Itoa(masterVariablesKey)
 	value, err := proto.Marshal(v)
 	if err != nil {
 		return err
 	}
-	return r.DB.Put(r.WriteOptions, key, value)
+	return r.DB.Put(r.WriteOptions, masterVariablesKey, value)
 }
 func (r *rocksDB) GetMasterVariables() (*comm.MasterVariables, error) {
-	key := strconv.Itoa(masterVariablesKey)
-	value, err := r.DB.Get(r.ReadOptions, key)
+	value, err := r.DB.Get(r.ReadOptions, masterVariablesKey)
 	if err != nil {
 		return nil, err
 	}
@@ -315,11 +383,16 @@ func (r *rocksDB) Close() {
 		r.WriteOptions.Destroy()
 		r.WriteOptions = nil
 	}
-	for r.DB != nil {
+	r.closeDB()
+}
+
+func (r *rocksDB) closeDB() {
+	if r.DB != nil {
 		r.DB.Close()
 		r.DB = nil
 	}
 	if r.logStore != nil {
 		r.logStore.Close()
+		r.logStore = nil
 	}
 }
