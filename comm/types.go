@@ -13,20 +13,25 @@
 // limitations under the License.
 package comm
 
-import "context"
+import (
+	"bytes"
+	"context"
+	"encoding/binary"
+	"unsafe"
+	"net"
+)
 
 type Receiver interface {
-	ReceiveMessage(msg []byte) error
+	ReceiveMessage([]byte)
 }
 
 type Sender interface {
-	SendMessage(ip string, port int, message []byte) error
+	SendMessage(string, []byte) error
 }
 
 type NetWork interface {
 	Start(context.Context, <-chan struct{}) error
 	Stop()
-	Receiver
 	Sender
 }
 
@@ -39,10 +44,11 @@ type Node interface {
 	BatchProposeWithCtx(context.Context, GroupID, []byte, InstanceID, uint32) error
 	CurrentInstanceID(GroupID) InstanceID
 	GetNodeID() NodeID
+	GetNodeCount() int
+	GetListenAddr() *net.TCPAddr
 
-	ReceiveMessage([]byte) error
+	ReceiveMessage([]byte)
 }
-
 
 type NodeID uint64
 type GroupID uint16
@@ -51,4 +57,37 @@ type StateMachineID uint64
 
 const (
 	UnknownNodeID = NodeID(0)
+	GroupIDLen = int(unsafe.Sizeof(GroupID(0)))
+	Int32Len = int(unsafe.Sizeof(int32(0)))
 )
+
+func ObjectToBytes(i interface{}) ([]byte, error) {
+	bytesBuffer := bytes.NewBuffer([]byte{})
+	if err := binary.Write(bytesBuffer, binary.BigEndian, i); err != nil {
+		return nil, err
+	}
+	return bytesBuffer.Bytes(), nil
+}
+
+func BytesToObject(b []byte, i interface{}) error {
+	bytesBuffer := bytes.NewBuffer(b)
+	return binary.Read(bytesBuffer, binary.BigEndian, i)
+}
+
+func IntToBytes(n int) ([]byte, error) {
+	d := int32(n)
+	bytesBuffer := bytes.NewBuffer([]byte{})
+	if err := binary.Write(bytesBuffer, binary.BigEndian, d); err != nil {
+		return nil, err
+	}
+	return bytesBuffer.Bytes(), nil
+}
+
+func BytesToInt(b []byte) (int, error) {
+	bytesBuffer := bytes.NewBuffer(b)
+	var n int32
+	if err := binary.Read(bytesBuffer, binary.BigEndian, &n); err != nil {
+		return 0, err
+	}
+	return int(n), nil
+}
