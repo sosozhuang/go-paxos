@@ -15,23 +15,20 @@ package paxos
 
 import (
 	"context"
-	"fmt"
-	"github.com/Masterminds/glide/msg"
 	"github.com/gogo/protobuf/proto"
 	"github.com/sosozhuang/paxos/comm"
 	"github.com/sosozhuang/paxos/logger"
-	"math"
 	"sync"
 	"sync/atomic"
 	"time"
 )
 
-type proposalID uint64
 type Reply func(*comm.PaxosMsg)
 type Proposer interface {
 	NewInstance()
 	GetInstanceID() comm.InstanceID
 	SetInstanceID(comm.InstanceID)
+	setProposalID(proposalID)
 	NewValue([]byte) *comm.PaxosMsg
 	OnPrepareReply(*comm.PaxosMsg)
 	OnAcceptReply(*comm.PaxosMsg)
@@ -45,22 +42,23 @@ const (
 	maxAcceptTimeout    = time.Second * 8
 )
 
-func NewProposer(pd, ad time.Duration, learner Learner) (Proposer, error) {
+func newProposer(nodeID comm.NodeID, tp Transporter, learner Learner, pt, at time.Duration) Proposer {
 	state := proposerState{
 		proposalID:     proposalID(1),
 		lastProposalID: proposalID(0),
 	}
 	return &proposer{
-		state:          state,
-		learner:        learner,
-		prepareTimeout: pd,
-		acceptTimeout:  ad,
-		//receiveNodes:         make(map[comm.NodeID]bool),
+		state:                state,
+		nodeID:               nodeID,
+		learner:              learner,
+		prepareTimeout:       pt,
+		acceptTimeout:        at,
 		rejectNodes:          make(map[comm.NodeID]bool),
 		promiseOrAcceptNodes: make(map[comm.NodeID]bool),
 		prepareReplies:       make(map[proposalID]Reply),
 		acceptReplies:        make(map[proposalID]Reply),
-	}, nil
+		tp:                   tp,
+	}
 }
 
 type proposer struct {
@@ -86,6 +84,10 @@ type proposer struct {
 	tp                   Transporter
 }
 
+func (p *proposer) setProposalID(proposalID proposalID) {
+	p.state.setProposalID(proposalID)
+}
+
 func (p *proposer) isWorking() bool {
 	return p.preparing || p.accepting
 }
@@ -94,8 +96,8 @@ func (p *proposer) GetInstanceID() comm.InstanceID {
 	return p.instanceID
 }
 
-func (p *proposer) SetInstanceID(instanceID comm.InstanceID) {
-	p.instanceID = instanceID
+func (p *proposer) SetInstanceID(id comm.InstanceID) {
+	p.instanceID = id
 }
 
 func (p *proposer) NewValue(ctx context.Context, stopped <-chan struct{}, errc chan<- error, value []byte) {
@@ -167,7 +169,7 @@ func (p *proposer) broadcastPrepareMessage(ctx context.Context, stopped <-chan s
 		} else {
 			p.addRejectNode(msg.NodeID)
 			p.rejected = true
-			p.state.SetLastPropalID(msg.GetRejectByPromiseID())
+			p.state.SetLastProposalID(msg.GetRejectByPromiseID())
 		}
 		if p.isPassed() {
 			ac <- struct{}{}
@@ -234,24 +236,16 @@ func (p *proposer) startNewRound() {
 	p.promiseOrAcceptNodes = make(map[comm.NodeID]struct{})
 }
 
-//func (p *proposer) addReceiveNode(nodeID comm.NodeID) {
-//	p.mu.Lock()
-//	defer p.mu.Unlock()
-//	p.receiveNodes[nodeID] = struct{}{}
-//}
-
 func (p *proposer) addRejectNode(nodeID comm.NodeID) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	p.rejectNodes[nodeID] = struct{}{}
-	//p.receiveNodes[nodeID] = struct{}{}
 }
 
 func (p *proposer) addPromiseOrAcceptNode(nodeID comm.NodeID) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	p.promiseOrAcceptNodes[nodeID] = struct{}{}
-	//p.receiveNodes[nodeID] = struct{}{}
 }
 
 func (p *proposer) isPassed() bool {
@@ -265,12 +259,6 @@ func (p *proposer) isRejected() bool {
 	defer p.mu.Unlock()
 	return len(p.rejectNodes) >= p.majorityCount()
 }
-
-//func (p *proposer) isAllReceived() bool {
-//	p.mu.Lock()
-//	defer p.mu.Unlock()
-//	return len(p.receiveNodes) == 0
-//}
 
 func (p *proposer) accept(ctx context.Context, stopped <-chan struct{}, errc chan<- error) {
 	p.preparing = false
@@ -309,7 +297,7 @@ func (p *proposer) broadcastAcceptMessage(ctx context.Context, stopped <-chan st
 		} else {
 			p.addRejectNode(msg.NodeID)
 			p.rejected = true
-			p.state.SetLastPropalID(msg.GetRejectByPromiseID())
+			p.state.SetLastProposalID(msg.GetRejectByPromiseID())
 		}
 		if p.isPassed() {
 			ac <- struct{}{}
@@ -357,7 +345,7 @@ func (p *proposer) broadcastAcceptMessage(ctx context.Context, stopped <-chan st
 		//accept
 		p.accepting = false
 		close(stopped)
-		p.learner.ProposerSendSuccess(p.instanceID, msg.GetProposalID())
+		p.learner.proposalFinished(p.instanceID, msg.GetProposalID())
 	case <-rc:
 		//reject
 		go func() {
@@ -382,6 +370,10 @@ type proposerState struct {
 	value          []byte
 }
 
+func (s *proposerState) setProposalID(proposalID proposalID) {
+	s.proposalID = proposalID
+}
+
 func (s *proposerState) setValue(value []byte) {
 	if s.value == nil || len(s.value) == 0 {
 		s.value = value
@@ -398,7 +390,7 @@ func (s *proposerState) setPreAcceptValue(b ballot, value []byte) {
 	}
 }
 
-func (s *proposerState) SetLastPropalID(id proposalID) {
+func (s *proposerState) SetLastProposalID(id proposalID) {
 	if id > s.lastProposalID {
 		s.lastProposalID = id
 	}
