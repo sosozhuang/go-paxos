@@ -24,6 +24,7 @@ import (
 	"context"
 	"github.com/sosozhuang/paxos/comm"
 	"github.com/gogo/protobuf/proto"
+	"os"
 )
 
 var log = logger.PaxosLogger
@@ -31,6 +32,7 @@ var log = logger.PaxosLogger
 type ldbs []*levelDB
 
 type levelDB struct {
+	dir string
 	*StorageConfig
 	*leveldb.DB
 	*opt.Options
@@ -104,7 +106,7 @@ func (ls *ldbs) GetMinChosenInstanceID(groupID comm.GroupID) (uint64, error) {
 	return ls[groupID].GetMinChosenInstanceID()
 }
 func (ls *ldbs) ClearAllLog(groupID comm.GroupID) error {
-	return ls[groupID].ClearAllLog()
+	return ls[groupID].Recreate()
 }
 func (ls *ldbs) SetSystemVariables(g comm.GroupID, v *comm.SystemVariables) error {
 	return ls[g].SetSystemVariables(v)
@@ -128,6 +130,7 @@ func newLevelDB(cfg *StorageConfig, dir string, comparer comparer.Comparer) (ldb
 		}
 	}()
 
+	ldb.dir = dir
 	ldb.Options = &opt.Options{
 		ErrorIfMissing: false,
 		//todo:  create option for every group?
@@ -171,79 +174,115 @@ func (l *levelDB) Open(ctx context.Context, stopped <-chan struct{}) error {
 	}
 }
 
-func (l *levelDB) Get(groupID comm.GroupID, instanceID comm.InstanceID) ([]byte, error) {
+func (l *levelDB) GetDir() string{
+	return l.dir
+}
+
+func (l *levelDB) Get(instanceID comm.InstanceID) ([]byte, error) {
 	return nil, nil
 }
 
-func (l *levelDB) Set(groupID comm.GroupID, instanceID comm.InstanceID, value []byte, opts *SetOptions) error {
+func (l *levelDB) Set(instanceID comm.InstanceID, value []byte, opts *SetOptions) error {
 	return nil
 }
 
-func (l *levelDB) Delete(groupID comm.GroupID, instanceID comm.InstanceID, opts *DeleteOptions) error {
+func (l *levelDB) Delete(instanceID comm.InstanceID, opts *DeleteOptions) error {
 	return nil
 }
-func (l *levelDB) GetMaxInstanceID() (comm.InstanceID, error) {
+func (l *levelDB) GetMaxInstanceID() (instanceID comm.InstanceID, err error) {
 	it := l.NewIterator(nil, l.ReadOptions)
 	defer it.Release()
+	var key uint64
 	for it.Last(); it.Valid(); it.Prev() {
-		id, err := strconv.ParseInt(string(it.Key()), 10, 64)
-		if err != nil {
-			return comm.InstanceID(0), err
+		if err = comm.BytesToObject(it.Key(), &key); err != nil {
+			return
 		}
-		if id != minChosenKey &&
-			id != systemVariablesKey &&
-			id != masterVariablesKey {
-			return id, nil
+		if key != minChosenKey &&
+			key != systemVariablesKey &&
+			key != masterVariablesKey {
+			return
 		}
 	}
-	return comm.InstanceID(0), nil
+	return
 }
 func (l *levelDB) SetMinChosenInstanceID(instanceID comm.InstanceID, opts *SetOptions) error {
-	key, err := comm.IntToBytes(minChosenKey)
-	if err != nil {
-		return err
-	}
 	value, err := comm.ObjectToBytes(instanceID)
 	if err != nil {
 		return err
 	}
-	return l.DB.Put(l.WriteOptions, key, value)
+	return l.DB.Put(minChosenKey, value, l.WriteOptions)
 }
 func (l *levelDB) GetMinChosenInstanceID() (comm.InstanceID, error) {
-	key, err := comm.IntToBytes(minChosenKey)
-	if err != nil {
-		return comm.InstanceID(0), err
-	}
-	value, err := l.DB.Get(key, l.ReadOptions)
-	if err != nil {
-		return comm.InstanceID(0), err
-	}
 	var instanceID comm.InstanceID
+	value, err := l.DB.Get(minChosenKey, l.ReadOptions)
+	if err == leveldb.ErrNotFound {
+		return instanceID, nil
+	}
+	if err != nil {
+		return instanceID, err
+	}
+	if len(value) == 12 {
+		value, err = l.Get(minChosenKey)
+		if err == ErrNotFound {
+			return instanceID, nil
+		}
+		if err != nil {
+			return instanceID, err
+		}
+	}
 	if err = comm.BytesToObject(value, &instanceID); err != nil {
-		return comm.InstanceID(0), err
+		return instanceID, err
 	}
 	return instanceID, nil
 }
-func (l *levelDB) ClearAllLog(groupID comm.GroupID) error {
-	return nil
-}
-func (l *levelDB) SetSystemVariables(v *comm.SystemVariables) error {
-	key, err := comm.IntToBytes(systemVariablesKey)
+func (l *levelDB) Recreate() error {
+	sv, err := l.GetSystemVariables()
+	if err != nil && err != ErrNotFound {
+		return err
+	}
+	mv, err := l.GetMasterVariables()
+	if err != nil && err != ErrNotFound {
+		return err
+	}
+	backup := path.Clean(l.dir) + ".bak"
+	if err = os.RemoveAll(backup); err != nil && !os.IsNotExist(err) {
+		return err
+	}
+	if err = os.Rename(l.dir, backup); err != nil {
+		return err
+	}
+
+	l.Close()
+	l.DB, err = leveldb.OpenFile(l.dir, l.Options)
 	if err != nil {
 		return err
 	}
+	l.logStore, err = newLogStore(l.dir, l)
+	if err != nil {
+		return err
+	}
+
+	if sv != nil {
+		if err = l.SetSystemVariables(sv); err != nil {
+			return err
+		}
+	}
+	if mv != nil {
+		if err = l.SetMasterVariables(mv); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+func (l *levelDB) SetSystemVariables(v *comm.SystemVariables) error {
 	value, err := proto.Marshal(v)
 	if err != nil {
 		return err
 	}
-	return l.DB.Put(l.WriteOptions, key, value)
+	return l.DB.Put(systemVariablesKey, value, l.WriteOptions)
 }
 func (l *levelDB) GetSystemVariables() (*comm.SystemVariables, error) {
-	key, err := comm.IntToBytes(systemVariablesKey)
-	if err != nil {
-		return nil, err
-	}
-	value, err := l.DB.Get(l.ReadOptions, key)
+	value, err := l.DB.Get(systemVariablesKey, l.ReadOptions)
 	if err == leveldb.ErrNotFound {
 		return nil, ErrNotFound
 	}
@@ -257,22 +296,14 @@ func (l *levelDB) GetSystemVariables() (*comm.SystemVariables, error) {
 	return v, nil
 }
 func (l *levelDB) SetMasterVariables(v *comm.MasterVariables) error {
-	key, err := comm.IntToBytes(masterVariablesKey)
-	if err != nil {
-		return err
-	}
 	value, err := proto.Marshal(v)
 	if err != nil {
 		return err
 	}
-	return l.DB.Put(l.WriteOptions, key, value)
+	return l.DB.Put(masterVariablesKey, value, l.WriteOptions)
 }
 func (l *levelDB) GetMasterVariables() (*comm.MasterVariables, error) {
-	key, err := comm.IntToBytes(masterVariablesKey)
-	if err != nil {
-		return nil, err
-	}
-	value, err := l.DB.Get(l.ReadOptions, key)
+	value, err := l.DB.Get(masterVariablesKey, l.ReadOptions)
 	if err == leveldb.ErrNotFound {
 		return nil, ErrNotFound
 	}
@@ -288,8 +319,10 @@ func (l *levelDB) GetMasterVariables() (*comm.MasterVariables, error) {
 func (l *levelDB) Close() {
 	if l.DB != nil {
 		l.DB.Close()
+		l.DB = nil
 	}
 	if l.logStore != nil {
 		l.logStore.Close()
+		l.logStore = nil
 	}
 }
