@@ -42,7 +42,7 @@ const (
 	maxAcceptTimeout    = time.Second * 8
 )
 
-func newProposer(nodeID comm.NodeID, tp Transporter, learner Learner, pt, at time.Duration) Proposer {
+func newProposer(nodeID comm.NodeID, groupID comm.GroupID, tp Transporter, learner Learner, pt, at time.Duration) Proposer {
 	state := proposerState{
 		proposalID:     proposalID(1),
 		lastProposalID: proposalID(0),
@@ -50,11 +50,12 @@ func newProposer(nodeID comm.NodeID, tp Transporter, learner Learner, pt, at tim
 	return &proposer{
 		state:                state,
 		nodeID:               nodeID,
+		groupID:              groupID,
 		learner:              learner,
 		prepareTimeout:       pt,
 		acceptTimeout:        at,
-		rejectNodes:          make(map[comm.NodeID]bool),
-		promiseOrAcceptNodes: make(map[comm.NodeID]bool),
+		rejectNodes:          make(map[comm.NodeID]struct{}),
+		promiseOrAcceptNodes: make(map[comm.NodeID]struct{}),
 		prepareReplies:       make(map[proposalID]Reply),
 		acceptReplies:        make(map[proposalID]Reply),
 		tp:                   tp,
@@ -65,6 +66,8 @@ type proposer struct {
 	state          proposerState
 	nodeCount      int
 	nodeID         comm.NodeID
+	groupID        comm.GroupID
+	instance       Instance
 	instanceID     comm.InstanceID
 	learner        Learner
 	preparing      bool
@@ -100,7 +103,7 @@ func (p *proposer) SetInstanceID(id comm.InstanceID) {
 	p.instanceID = id
 }
 
-func (p *proposer) NewValue(ctx context.Context, stopped <-chan struct{}, errc chan<- error, value []byte) {
+func (p *proposer) newValue(ctx context.Context, stopped <-chan struct{}, errc chan<- error, value []byte) {
 	if v, ok := ctx.Value("").([]byte); ok {
 		p.state.setValue(v)
 	}
@@ -180,8 +183,7 @@ func (p *proposer) broadcastPrepareMessage(ctx context.Context, stopped <-chan s
 	p.prepareMu.Unlock()
 
 	if deadline, ok := ctx.Deadline(); ok {
-		d := deadline.Sub(time.Now())
-		if d < p.prepareTimeout {
+		if d := deadline.Sub(time.Now()); d < p.prepareTimeout {
 			p.prepareTimeout = d
 		}
 	}
@@ -195,7 +197,10 @@ func (p *proposer) broadcastPrepareMessage(ctx context.Context, stopped <-chan s
 		p.prepareMu.Unlock()
 	}()
 
-	p.tp.Broadcast()
+	go func() {
+		p.instance.ReceivePaxosMessage(msg)
+		p.tp.broadcast(p.groupID, comm.MsgType_Paxos, msg)
+	}()
 
 	select {
 	case <-ctx.Done():
@@ -271,7 +276,7 @@ func (p *proposer) accept(ctx context.Context, stopped <-chan struct{}, errc cha
 		NodeID:       proto.Uint64(p.nodeID),
 		ProposalID:   proto.Uint64(p.state.proposalID),
 		Value:        p.state.value,
-		LastChecksum: proto.Uint32(0),
+		Checksum: proto.Uint32(0),
 	}
 
 	select {
@@ -323,7 +328,10 @@ func (p *proposer) broadcastAcceptMessage(ctx context.Context, stopped <-chan st
 		p.acceptMu.Unlock()
 	}()
 
-	p.tp.Broadcast()
+	go func() {
+		p.tp.broadcast(p.groupID, comm.MsgType_Paxos, msg)
+		p.instance.ReceivePaxosMessage(msg)
+	}()
 
 	select {
 	case <-ctx.Done():
@@ -344,8 +352,8 @@ func (p *proposer) broadcastAcceptMessage(ctx context.Context, stopped <-chan st
 	case <-ac:
 		//accept
 		p.accepting = false
-		close(stopped)
 		p.learner.proposalFinished(p.instanceID, msg.GetProposalID())
+		close(stopped)
 	case <-rc:
 		//reject
 		go func() {
