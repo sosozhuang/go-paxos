@@ -18,17 +18,18 @@ import (
 	"github.com/gogo/protobuf/proto"
 	"hash/crc32"
 )
-type broadcastType int
-const (
-	localFirst broadcastType = iota
-	remoteFirst
-	remoteOnly
-)
+//type broadcastType int
+//const (
+//	localFirst broadcastType = iota
+//	remoteFirst
+//	remoteOnly
+//)
 
 type Transporter interface {
-	Send()
-	Broadcast(comm.PaxosMsg, broadcastType)
-	BroadcastToFollower()
+	send(comm.NodeID, comm.GroupID, comm.MsgType, proto.Message)
+	broadcast(comm.GroupID, comm.MsgType, proto.Message)
+	broadcastToFollower(comm.GroupID, comm.MsgType, proto.Message)
+	broadcastToTmpNode()
 }
 
 func NewTransporter() (Transporter, error) {
@@ -36,12 +37,24 @@ func NewTransporter() (Transporter, error) {
 }
 
 type transporter struct {
-	nodeID comm.NodeID
+	node   comm.Node
 	sender comm.Sender
 }
 
-func (t *transporter) Send() {
-	t.sender.SendMessage()
+func (t *transporter) send(nodeID comm.NodeID, groupID comm.GroupID, msgType comm.MsgType, msg proto.Message) {
+	b, err := t.pack(groupID, msgType, msg)
+	if err != nil {
+		log.Error(err)
+		return
+	}
+
+	peers := t.node.GetPeers()
+	addr, ok := peers[nodeID]
+	if !ok {
+		log.Error("can't find node")
+		return
+	}
+	t.sender.SendMessage(addr.String(), b)
 }
 
 func (t *transporter) pack(groupID comm.GroupID, msgType comm.MsgType, pb proto.Message) ([]byte, error) {
@@ -83,10 +96,30 @@ func (t *transporter) pack(groupID comm.GroupID, msgType comm.MsgType, pb proto.
 	return b, nil
 }
 
-func (t *transporter) Broadcast() {
-	t.sender.SendMessage()
+func (t *transporter) broadcast(groupID comm.GroupID, msgType comm.MsgType, msg proto.Message) {
+	b, err := t.pack(groupID, msgType, msg)
+	if err != nil {
+		log.Error(err)
+		return
+	}
+
+	for _, addr := range t.node.GetPeers() {
+		if err = t.sender.SendMessage(addr.String(), b); err != nil {
+			log.Error(err)
+		}
+	}
 }
 
-func (t *transporter) BroadcastToFollower() {
+func (t *transporter) broadcastToFollower(groupID comm.GroupID, msgType comm.MsgType, msg proto.Message) {
+	b, err := t.pack(groupID, msgType, msg)
+	if err != nil {
+		log.Error(err)
+		return
+	}
 
+	for _, addr := range t.node.GetFollowers() {
+		if err = t.sender.SendMessage(addr.String(), b); err != nil {
+			log.Error(err)
+		}
+	}
 }
