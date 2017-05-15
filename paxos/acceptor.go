@@ -32,6 +32,7 @@ type Acceptor interface {
 	GetInstanceID() comm.InstanceID
 	SetInstanceID(comm.InstanceID)
 	getPromisedProposalID() proposalID
+	getAcceptorState() acceptorState
 	onPrepare(*comm.PaxosMsg)
 	onAccept(*comm.PaxosMsg)
 }
@@ -55,6 +56,7 @@ func newAcceptor(nodeID comm.NodeID, instance Instance, tp Transporter, st store
 
 type acceptor struct {
 	nodeID     comm.NodeID
+	groupID    comm.GroupID
 	instanceID comm.InstanceID
 	instance   Instance
 	tp         Transporter
@@ -79,7 +81,7 @@ func (a *acceptor) getPromisedProposalID() proposalID {
 	return a.state.promisedBallot.proposalID
 }
 
-func (a *acceptor) onPrepare(msg *comm.PaxosMsg) error {
+func (a *acceptor) onPrepare(msg *comm.PaxosMsg) {
 	replyMsg := &comm.PaxosMsg{
 		Type:       comm.PaxosMsgType_PrepareReply.Enum(),
 		InstanceID: proto.Uint64(a.instanceID),
@@ -100,11 +102,10 @@ func (a *acceptor) onPrepare(msg *comm.PaxosMsg) error {
 		replyMsg.RejectByPromiseID = proto.Uint64(a.state.promisedBallot.proposalID)
 	}
 
-	//todo: send message
-	return nil
+	a.tp.send(msg.NodeID, a.groupID, comm.MsgType_Paxos, replyMsg)
 }
 
-func (a *acceptor) onAccept(msg *comm.PaxosMsg) error {
+func (a *acceptor) onAccept(msg *comm.PaxosMsg) {
 	replyMsg := &comm.PaxosMsg{
 		Type:       comm.PaxosMsgType_AcceptReply.Enum(),
 		InstanceID: proto.Uint64(a.instanceID),
@@ -123,8 +124,7 @@ func (a *acceptor) onAccept(msg *comm.PaxosMsg) error {
 		replyMsg.RejectByPromiseID = proto.Uint64(a.state.promisedBallot.proposalID)
 	}
 
-	//todo: send message
-	return nil
+	a.tp.send(msg.NodeID, a.groupID, comm.MsgType_Paxos, replyMsg)
 }
 
 type acceptorState struct {
