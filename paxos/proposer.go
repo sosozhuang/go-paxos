@@ -25,7 +25,7 @@ import (
 
 type Reply func(*comm.PaxosMsg)
 type Proposer interface {
-	NewInstance()
+	newInstance()
 	GetInstanceID() comm.InstanceID
 	SetInstanceID(comm.InstanceID)
 	setProposalID(proposalID)
@@ -63,20 +63,19 @@ func newProposer(nodeID comm.NodeID, groupID comm.GroupID, tp Transporter, learn
 }
 
 type proposer struct {
-	state          proposerState
-	nodeCount      int
-	nodeID         comm.NodeID
-	groupID        comm.GroupID
-	instance       Instance
-	instanceID     comm.InstanceID
-	learner        Learner
-	preparing      bool
-	accepting      bool
-	skipPrepare    bool
-	rejected       bool
-	prepareTimeout time.Duration
-	acceptTimeout  time.Duration
-	//receiveNodes         map[comm.NodeID]struct{}
+	state                proposerState
+	nodeCount            int
+	nodeID               comm.NodeID
+	groupID              comm.GroupID
+	instance             Instance
+	instanceID           comm.InstanceID
+	learner              Learner
+	preparing            bool
+	accepting            bool
+	skipPrepare          bool
+	rejected             bool
+	prepareTimeout       time.Duration
+	acceptTimeout        time.Duration
 	rejectNodes          map[comm.NodeID]struct{}
 	promiseOrAcceptNodes map[comm.NodeID]struct{}
 	mu                   sync.Mutex
@@ -85,6 +84,14 @@ type proposer struct {
 	acceptMu             sync.RWMutex
 	acceptReplies        map[proposalID]Reply
 	tp                   Transporter
+}
+
+func (p *proposer) newInstance() {
+	atomic.AddUint64(&p.instanceID, 1)
+	p.startNewRound()
+	p.state.reset()
+	p.preparing = false
+	p.accepting = false
 }
 
 func (p *proposer) setProposalID(proposalID proposalID) {
@@ -271,12 +278,12 @@ func (p *proposer) accept(ctx context.Context, stopped <-chan struct{}, errc cha
 
 	p.startNewRound()
 	msg := &comm.PaxosMsg{
-		Type:         comm.PaxosMsgType_Accept.Enum(),
-		InstanceID:   proto.Uint64(p.instanceID),
-		NodeID:       proto.Uint64(p.nodeID),
-		ProposalID:   proto.Uint64(p.state.proposalID),
-		Value:        p.state.value,
-		Checksum: proto.Uint32(0),
+		Type:       comm.PaxosMsgType_Accept.Enum(),
+		InstanceID: proto.Uint64(p.instanceID),
+		NodeID:     proto.Uint64(p.nodeID),
+		ProposalID: proto.Uint64(p.state.proposalID),
+		Value:      p.state.value,
+		Checksum:   proto.Uint32(p.instance.getChecksum()),
 	}
 
 	select {
@@ -371,11 +378,20 @@ func (p *proposer) OnAcceptReply(msg *comm.PaxosMsg) {
 	}
 }
 
+func (p *proposer) cancelSkipPrepare() {
+	p.skipPrepare = false
+}
+
 type proposerState struct {
 	ballot
 	proposalID
 	lastProposalID proposalID
 	value          []byte
+}
+
+func (s *proposerState) reset() {
+	s.lastProposalID = 0
+	s.value = nil
 }
 
 func (s *proposerState) setProposalID(proposalID proposalID) {
