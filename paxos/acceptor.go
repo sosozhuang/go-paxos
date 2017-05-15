@@ -19,6 +19,7 @@ import (
 	"github.com/sosozhuang/paxos/logger"
 	"github.com/sosozhuang/paxos/store"
 	"hash/crc32"
+	"sync/atomic"
 )
 
 const (
@@ -28,9 +29,9 @@ const (
 
 type Acceptor interface {
 	start() error
-	NewInstance()
-	GetInstanceID() comm.InstanceID
-	SetInstanceID(comm.InstanceID)
+	newInstance()
+	getInstanceID() comm.InstanceID
+	setInstanceID(comm.InstanceID)
 	getPromisedProposalID() proposalID
 	getAcceptorState() acceptorState
 	onPrepare(*comm.PaxosMsg)
@@ -41,10 +42,6 @@ func newAcceptor(nodeID comm.NodeID, instance Instance, tp Transporter, st store
 	s := acceptorState{
 		st: st,
 	}
-	//instanceID, err := s.load()
-	//if err != nil {
-	//	return nil, err
-	//}
 	a := &acceptor{
 		nodeID:     nodeID,
 		instance:   instance,
@@ -65,15 +62,19 @@ type acceptor struct {
 
 func (a *acceptor) start() (err error) {
 	a.instanceID, err = a.state.load()
-	//a.state.init()
 	return
 }
 
-func (a *acceptor) GetInstanceID() comm.InstanceID {
+func (a *acceptor) newInstance() {
+	atomic.AddUint64(&a.instanceID, 1)
+	a.state.reset()
+}
+
+func (a *acceptor) getInstanceID() comm.InstanceID {
 	return a.instanceID
 }
 
-func (a *acceptor) SetInstanceID(id comm.InstanceID) {
+func (a *acceptor) setInstanceID(id comm.InstanceID) {
 	a.instanceID = id
 }
 
@@ -135,15 +136,15 @@ type acceptorState struct {
 	checksum
 }
 
-//func (a *acceptorState) init() {
-//	a.acceptedBallot.reset()
-//	a.acceptedValue = make([]byte, 0)
-//	a.checksum = checksum(0)
-//}
+func (a *acceptorState) reset() {
+	a.acceptedBallot.reset()
+	a.acceptedValue = nil
+	a.checksum = 0
+}
 
-func (a *acceptorState) save(instanceID comm.InstanceID, checksum uint32) error {
+func (a *acceptorState) save(instanceID comm.InstanceID, checksum checksum) error {
 	if instanceID > 0 && checksum == 0 {
-		a.checksum = uint32(0)
+		a.checksum = 0
 	} else if len(a.acceptedValue) > 0 {
 		a.checksum = crc32.Update(checksum, crcTable, a.acceptedValue)
 	}
@@ -169,10 +170,10 @@ func (a *acceptorState) save(instanceID comm.InstanceID, checksum uint32) error 
 func (a *acceptorState) load() (comm.InstanceID, error) {
 	instanceID, err := a.st.GetMaxInstanceID()
 	if err == store.ErrNotFound {
-		return comm.InstanceID(0), nil
+		return 0, nil
 	}
 	if err != nil {
-		return instanceID, err
+		return 0, err
 	}
 	b, err := a.st.Get(instanceID)
 	if err != nil {
@@ -188,5 +189,5 @@ func (a *acceptorState) load() (comm.InstanceID, error) {
 	a.acceptedBallot.nodeID = state.GetAcceptedNodeID()
 	a.acceptedValue = state.GetAcceptedValue()
 	a.checksum = state.GetChecksum()
-	return nil
+	return instanceID, nil
 }
