@@ -42,7 +42,7 @@ type transporter struct {
 }
 
 func (t *transporter) send(nodeID comm.NodeID, groupID comm.GroupID, msgType comm.MsgType, msg proto.Message) {
-	b, err := t.pack(groupID, msgType, msg)
+	b, err := pack(groupID, msgType, msg)
 	if err != nil {
 		log.Error(err)
 		return
@@ -57,7 +57,7 @@ func (t *transporter) send(nodeID comm.NodeID, groupID comm.GroupID, msgType com
 	t.sender.SendMessage(addr.String(), b)
 }
 
-func (t *transporter) pack(groupID comm.GroupID, msgType comm.MsgType, pb proto.Message) ([]byte, error) {
+func pack(groupID comm.GroupID, msgType comm.MsgType, pb proto.Message) ([]byte, error) {
 	header := &comm.Header{
 		ClusterID: proto.Uint64(0),
 		Type: msgType.Enum(),
@@ -97,7 +97,7 @@ func (t *transporter) pack(groupID comm.GroupID, msgType comm.MsgType, pb proto.
 }
 
 func (t *transporter) broadcast(groupID comm.GroupID, msgType comm.MsgType, msg proto.Message) {
-	b, err := t.pack(groupID, msgType, msg)
+	b, err := pack(groupID, msgType, msg)
 	if err != nil {
 		log.Error(err)
 		return
@@ -111,7 +111,7 @@ func (t *transporter) broadcast(groupID comm.GroupID, msgType comm.MsgType, msg 
 }
 
 func (t *transporter) broadcastToFollower(groupID comm.GroupID, msgType comm.MsgType, msg proto.Message) {
-	b, err := t.pack(groupID, msgType, msg)
+	b, err := pack(groupID, msgType, msg)
 	if err != nil {
 		log.Error(err)
 		return
