@@ -29,6 +29,7 @@ const (
 
 type Acceptor interface {
 	start() error
+	reset()
 	newInstance()
 	getInstanceID() comm.InstanceID
 	setInstanceID(comm.InstanceID)
@@ -53,7 +54,6 @@ func newAcceptor(nodeID comm.NodeID, instance Instance, tp Transporter, st store
 
 type acceptor struct {
 	nodeID     comm.NodeID
-	groupID    comm.GroupID
 	instanceID comm.InstanceID
 	instance   Instance
 	tp         Transporter
@@ -63,6 +63,10 @@ type acceptor struct {
 func (a *acceptor) start() (err error) {
 	a.instanceID, err = a.state.load()
 	return
+}
+
+func (a *acceptor) reset() {
+	a.state.reset()
 }
 
 func (a *acceptor) newInstance() {
@@ -83,6 +87,14 @@ func (a *acceptor) getPromisedProposalID() proposalID {
 }
 
 func (a *acceptor) onPrepare(msg *comm.PaxosMsg) {
+	if msg.GetInstanceID() == a.instanceID+1 {
+		newMsg := *msg
+		newMsg.InstanceID = proto.Uint64(a.instanceID)
+		newMsg.Type = comm.PaxosMsgType_ProposalFinished.Enum()
+		a.instance.ReceivePaxosMessage(&newMsg)
+		return
+	}
+
 	replyMsg := &comm.PaxosMsg{
 		Type:       comm.PaxosMsgType_PrepareReply.Enum(),
 		InstanceID: proto.Uint64(a.instanceID),
@@ -97,16 +109,24 @@ func (a *acceptor) onPrepare(msg *comm.PaxosMsg) {
 		a.state.promisedBallot = b
 		if err := a.state.save(a.instanceID); err != nil {
 			alog.Error(err)
-			return err
+			return
 		}
 	} else {
 		replyMsg.RejectByPromiseID = proto.Uint64(a.state.promisedBallot.proposalID)
 	}
 
-	a.tp.send(msg.NodeID, a.groupID, comm.MsgType_Paxos, replyMsg)
+	a.tp.send(msg.NodeID, comm.MsgType_Paxos, replyMsg)
 }
 
 func (a *acceptor) onAccept(msg *comm.PaxosMsg) {
+	if msg.GetInstanceID() == a.instanceID+1 {
+		newMsg := *msg
+		newMsg.InstanceID = proto.Uint64(a.instanceID)
+		newMsg.Type = comm.PaxosMsgType_ProposalFinished.Enum()
+		a.instance.ReceivePaxosMessage(&newMsg)
+		return
+	}
+
 	replyMsg := &comm.PaxosMsg{
 		Type:       comm.PaxosMsgType_AcceptReply.Enum(),
 		InstanceID: proto.Uint64(a.instanceID),
@@ -119,13 +139,13 @@ func (a *acceptor) onAccept(msg *comm.PaxosMsg) {
 		a.state.acceptedBallot = b
 		a.state.acceptedValue = msg.Value
 		if err := a.state.save(a.instanceID); err != nil {
-			return err
+			return
 		}
 	} else {
 		replyMsg.RejectByPromiseID = proto.Uint64(a.state.promisedBallot.proposalID)
 	}
 
-	a.tp.send(msg.NodeID, a.groupID, comm.MsgType_Paxos, replyMsg)
+	a.tp.send(msg.NodeID, comm.MsgType_Paxos, replyMsg)
 }
 
 type acceptorState struct {

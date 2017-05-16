@@ -23,7 +23,6 @@ import (
 	"sync"
 	"time"
 	"sync/atomic"
-	"k8s.io/client-go/pkg/fields"
 )
 
 const (
@@ -33,7 +32,7 @@ const (
 type Learner interface {
 	start()
 	Stop()
-	SetInstanceID(comm.InstanceID)
+	setInstanceID(comm.InstanceID)
 	newInstance()
 	AskForLearn()
 	onAskForLearn(*comm.PaxosMsg)
@@ -46,6 +45,9 @@ type Learner interface {
 	proposalFinished(comm.InstanceID, proposalID)
 	isLearned() bool
 	isReadyForNewValue() bool
+	getChecksum() checksum
+	onSendCheckpoint(*comm.CheckpointMsg)
+	onAckSendCheckpoint(*comm.CheckpointMsg)
 }
 
 func newLearner(nodeID comm.NodeID, instance Instance, tp Transporter, st store.Storage, acceptor Acceptor, cpm checkpoint.CheckpointManager) (Learner, error) {
@@ -57,7 +59,6 @@ type learner struct {
 	acceptor           Acceptor
 	learning           bool
 	nodeID             comm.NodeID
-	groupID            comm.GroupID
 	instanceID         comm.InstanceID
 	lastAckInstanceID  comm.InstanceID
 	lastSeenInstanceID comm.InstanceID
@@ -77,7 +78,7 @@ func (l *learner) newInstance() {
 	l.state
 }
 
-func (l *learner) SetInstanceID(id comm.InstanceID) {
+func (l *learner) setInstanceID(id comm.InstanceID) {
 	l.instanceID = id
 }
 
@@ -98,7 +99,7 @@ func (l *learner) proposalFinished(instanceID comm.InstanceID, proposalID propos
 		Checksum: proto.Uint32(0),
 	}
 	l.instance.ReceivePaxosMessage(msg)
-	l.tp.broadcast(l.groupID, comm.MsgType_Paxos, msg)
+	l.tp.broadcast(comm.MsgType_Paxos, msg)
 }
 
 func (l *learner) onProposalFinished(msg *comm.PaxosMsg) {
@@ -113,7 +114,7 @@ func (l *learner) onProposalFinished(msg *comm.PaxosMsg) {
 		return
 	}
 
-	l.state.learnWithoutWrite(msg.GetInstanceID(), l.acceptor.getAcceptorState().acceptedValue, 0)
+	l.state.learn(l.acceptor.getAcceptorState().acceptedValue, 0)
 	l.broadcastToFollower()
 }
 
@@ -128,7 +129,7 @@ func (l *learner) broadcastToFollower() {
 		Checksum:   proto.Uint32(0),
 	}
 
-	l.tp.broadcastToFollower(l.groupID, comm.MsgType_Paxos, msg)
+	l.tp.broadcastToFollowers(comm.MsgType_Paxos, msg)
 }
 
 func (l *learner) sendValue(nodeID comm.NodeID, instanceID comm.InstanceID, b ballot, value []byte, checksum checksum, ack bool) {
@@ -144,7 +145,7 @@ func (l *learner) sendValue(nodeID comm.NodeID, instanceID comm.InstanceID, b ba
 	if ack {
 		msg.Flag = 0
 	}
-	l.tp.send(nodeID, l.groupID, comm.MsgType_Paxos, msg)
+	l.tp.send(nodeID, comm.MsgType_Paxos, msg)
 }
 
 func (l *learner) onSendValue(msg *comm.PaxosMsg) {
@@ -152,7 +153,7 @@ func (l *learner) onSendValue(msg *comm.PaxosMsg) {
 		return
 	}
 	b := ballot{msg.GetProposalID(), msg.GetProposalNodeID()}
-	if err := l.state.learn(msg.GetInstanceID(), b, msg.GetValue(), 0); err != nil {
+	if err := l.state.learnAndSave(msg.GetInstanceID(), b, msg.GetValue(), 0); err != nil {
 		llog.Error(err)
 		return
 	}
@@ -174,7 +175,7 @@ func (l *learner) ackSendValue(nodeID comm.NodeID) {
 		InstanceID: proto.Uint64(l.instanceID),
 		NodeID:     proto.Uint64(l.nodeID),
 	}
-	l.tp.send(nodeID, l.groupID, comm.MsgType_Paxos, msg)
+	l.tp.send(nodeID, comm.MsgType_Paxos, msg)
 }
 
 func (l *learner) onAckSendValue(msg *comm.PaxosMsg) {
@@ -196,9 +197,9 @@ func (l *learner) askForLearn() {
 	if true {
 		msg.ProposalNodeID = 0
 	}
-	l.tp.broadcast(l.groupID, comm.MsgType_Paxos, msg)
+	l.tp.broadcast(comm.MsgType_Paxos, msg)
 	l.instance.ReceivePaxosMessage(msg)
-	l.tp.broadcastToTmpNode()
+	l.tp.broadcastToLearnNodes()
 
 	time.Sleep(time.Second)
 	go l.askForLearn()
@@ -208,12 +209,20 @@ func (l *learner) onConfirmAskForLearn(msg *comm.PaxosMsg) {
 	l.sender.confirm(msg.GetInstanceID(), msg.GetNodeID())
 }
 
+func (l *learner) isLearned() bool {
+	return l.state.learned
+}
+
 func (l *learner) isReadyForNewValue() bool {
 	return l.instanceID+1 >= l.lastSeenInstanceID
 }
 
+func (l *learner) getChecksum() checksum {
+	return l.state.checksum
+}
+
 func (l *learner) askForCheckpoint(nodeID comm.NodeID) {
-	if err := l.cpm.PrepareForAskforCheckpoint(nodeID); err != nil {
+	if err := l.cpm.PrepareForAskForCheckpoint(nodeID); err != nil {
 		log.Error(err)
 		return
 	}
@@ -222,7 +231,7 @@ func (l *learner) askForCheckpoint(nodeID comm.NodeID) {
 		NodeID:     proto.Uint64(l.nodeID),
 		InstanceID: proto.Uint64(l.instanceID),
 	}
-	l.tp.send(nodeID, l.groupID, comm.MsgType_Paxos, msg)
+	l.tp.send(nodeID, comm.MsgType_Paxos, msg)
 }
 
 func (l *learner) onAskForCheckpoint(msg *comm.PaxosMsg) {
@@ -238,7 +247,7 @@ func (l *learner) sendCheckpointStarted(nodeID comm.NodeID, uuid uint64, sequenc
 		Sequence:             proto.Uint64(sequence),
 		CheckpointInstanceID: proto.Uint64(checkpointInstanceID),
 	}
-	l.tp.send(nodeID, l.groupID, comm.MsgType_Checkpoint, msg)
+	l.tp.send(nodeID, comm.MsgType_Checkpoint, msg)
 }
 
 func (l *learner) sendCheckpointFinished(nodeID comm.NodeID, uuid uint64, sequence uint64, checkpointInstanceID comm.InstanceID) {
@@ -250,7 +259,7 @@ func (l *learner) sendCheckpointFinished(nodeID comm.NodeID, uuid uint64, sequen
 		Sequence:             proto.Uint64(sequence),
 		CheckpointInstanceID: proto.Uint64(checkpointInstanceID),
 	}
-	l.tp.send(nodeID, l.groupID, comm.MsgType_Checkpoint, msg)
+	l.tp.send(nodeID, comm.MsgType_Checkpoint, msg)
 }
 
 func (l *learner) sendCheckpoint(nodeID comm.NodeID, uuid uint64, sequence uint64, checkpointInstanceID comm.InstanceID,
@@ -268,7 +277,7 @@ func (l *learner) sendCheckpoint(nodeID comm.NodeID, uuid uint64, sequence uint6
 		Offset:               proto.Uint64(offset),
 		Buffer:               b,
 	}
-	l.tp.send(nodeID, l.groupID, comm.MsgType_Checkpoint, msg)
+	l.tp.send(nodeID, comm.MsgType_Checkpoint, msg)
 }
 
 func (l *learner) onSendCheckpointStarted(msg *comm.CheckpointMsg) {
@@ -305,7 +314,7 @@ func (l *learner) ackSendCheckpoint(nodeID comm.NodeID, uuid, sequence uint64, f
 		Sequence: proto.Uint64(sequence),
 		Flag:     flag.Enum(),
 	}
-	l.tp.send(nodeID, l.groupID, comm.MsgType_Checkpoint, msg)
+	l.tp.send(nodeID, comm.MsgType_Checkpoint, msg)
 }
 
 func (l *learner) onAckSendCheckpoint(msg *comm.CheckpointMsg) {
@@ -313,29 +322,29 @@ func (l *learner) onAckSendCheckpoint(msg *comm.CheckpointMsg) {
 }
 
 type learnerState struct {
-	value   []byte
-	learned bool
 	checksum
-	storage store.Storage
+	learned bool
+	value   []byte
+	st      store.Storage
 }
 
 func (l *learnerState) reset() {
-	l.value = nil
 	l.learned = false
+	l.value = nil
 	l.checksum = 0
 }
 
-func (l *learnerState) learnWithoutWrite(instanceID comm.InstanceID, value []byte, checksum uint32) {
+func (l *learnerState) learn(value []byte, cs checksum) {
 	l.value = value
 	l.learned = true
-	l.checksum = checksum
+	l.checksum = cs
 }
 
-func (l *learnerState) learn(instanceID comm.InstanceID, b ballot, value []byte, checksum checksum) error {
-	if instanceID > 0 && checksum == 0 {
+func (l *learnerState) learnAndSave(instanceID comm.InstanceID, b ballot, value []byte, cs checksum) error {
+	if instanceID > 0 && cs == 0 {
 		l.checksum = 0
-	} else if len(l.value) > 0 {
-		l.checksum = crc32.Update(checksum, crcTable, l.value)
+	} else if l.value != nil && len(l.value) > 0 {
+		l.checksum = crc32.Update(cs, crcTable, l.value)
 	}
 	state := &comm.AcceptorStateData{
 		InstanceID:     proto.Uint64(instanceID),
@@ -350,11 +359,11 @@ func (l *learnerState) learn(instanceID comm.InstanceID, b ballot, value []byte,
 	if err != nil {
 		return err
 	}
-	if err := l.storage.Set(instanceID, b); err != nil {
+	if err := l.st.Set(instanceID, b); err != nil {
 		return err
 	}
 
-	l.learnWithoutWrite(instanceID, value, l.checksum)
+	l.learn(value, l.checksum)
 	return nil
 }
 
