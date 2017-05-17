@@ -122,7 +122,7 @@ func (i *instance) Start(ctx context.Context, stopped <-chan struct{}) error {
 		return err
 	}
 
-	i.learner.AskForLearn()
+	i.learner.AskForLearn(time.Second * 3)
 
 	if err := i.cpm.Start(ctx, stopped); err != nil {
 		return err
