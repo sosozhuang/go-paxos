@@ -24,7 +24,7 @@ type Transporter interface {
 	send(comm.NodeID, comm.MsgType, proto.Message)
 	broadcast(comm.MsgType, proto.Message)
 	broadcastToFollowers(comm.MsgType, proto.Message)
-	broadcastToLearnNodes()
+	broadcastToLearnNodes(comm.MsgType, proto.Message)
 }
 
 func NewTransporter() (Transporter, error) {
@@ -107,7 +107,7 @@ func (t *transporter) broadcast(msgType comm.MsgType, msg proto.Message) {
 	}
 }
 
-func (t *transporter) broadcastToFollower(msgType comm.MsgType, msg proto.Message) {
+func (t *transporter) broadcastToFollowers(msgType comm.MsgType, msg proto.Message) {
 	b, err := t.pack(msgType, msg)
 	if err != nil {
 		log.Error(err)
