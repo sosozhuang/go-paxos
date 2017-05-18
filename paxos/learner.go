@@ -14,17 +14,17 @@
 package paxos
 
 import (
+	"errors"
 	"github.com/gogo/protobuf/proto"
 	"github.com/sosozhuang/paxos/checkpoint"
 	"github.com/sosozhuang/paxos/comm"
 	"github.com/sosozhuang/paxos/logger"
 	"github.com/sosozhuang/paxos/store"
 	"hash/crc32"
+	"math"
 	"sync"
 	"sync/atomic"
 	"time"
-	"errors"
-	"math"
 )
 
 const (
@@ -54,6 +54,7 @@ type Learner interface {
 	SendCheckpointFinished(nodeID comm.NodeID, uuid uint64, sequence uint64, checkpointInstanceID comm.InstanceID)
 	sendValue(comm.NodeID, comm.InstanceID, ballot, []byte, checksum, bool)
 	getInstanceID() comm.InstanceID
+	getValue() []byte
 }
 
 func newLearner(nodeID comm.NodeID, instance Instance, tp Transporter, st store.Storage, acceptor Acceptor, cpm checkpoint.CheckpointManager) (Learner, error) {
@@ -69,7 +70,7 @@ type learner struct {
 	lastAckInstanceID  comm.InstanceID
 	lastSeenInstanceID comm.InstanceID
 	lastSeenNodeID     comm.NodeID
-	done chan struct{}
+	done               chan struct{}
 	instance           Instance
 	cpm                checkpoint.CheckpointManager
 	cps                checkpoint.Sender
@@ -97,6 +98,10 @@ func (l *learner) SetLastSeenInstanceID(instanceID comm.InstanceID, nodeID comm.
 		l.lastSeenNodeID = nodeID
 	}
 
+}
+
+func (l *learner) getValue() []byte {
+	return l.state.value
 }
 
 func (l *learner) proposalFinished(instanceID comm.InstanceID, proposalID proposalID) {
@@ -505,7 +510,7 @@ type sender struct {
 	nodeID          comm.NodeID
 	startInstanceID comm.InstanceID
 	ackInstanceID   comm.InstanceID
-	wg sync.WaitGroup
+	wg              sync.WaitGroup
 	mu              sync.Mutex
 	st              store.Storage
 }
@@ -544,8 +549,8 @@ func (s *sender) checkAck(instanceID comm.InstanceID) bool {
 	if instanceID < s.ackInstanceID {
 		return false
 	}
-	for instanceID > s.ackInstanceID + 100 {
-		if time.Now().Sub(s.lastAckTime) >= time.Second * 5 {
+	for instanceID > s.ackInstanceID+100 {
+		if time.Now().Sub(s.lastAckTime) >= time.Second*5 {
 			return false
 		}
 		time.Sleep(time.Millisecond * 10)
@@ -596,15 +601,15 @@ func (s *sender) confirm(start comm.InstanceID, nodeID comm.NodeID) bool {
 
 func (s *sender) send(instanceID comm.InstanceID, nodeID comm.NodeID) {
 	var (
-		cs checksum
-		err error
-		sleep int
+		cs       checksum
+		err      error
+		sleep    int
 		interval int
 	)
 	qps := 100
 	if qps > 1000 {
 		sleep = 1
-		interval = qps /1000 + 1
+		interval = qps/1000 + 1
 	} else {
 		sleep = 1000 / qps
 		interval = 1
@@ -614,12 +619,12 @@ func (s *sender) send(instanceID comm.InstanceID, nodeID comm.NodeID) {
 		if cs, err = s.sendValue(id, nodeID, cs); err != nil {
 			return
 		}
-		if !s.checkAck(id){
+		if !s.checkAck(id) {
 			break
 		}
 		s.lastSendTime = time.Now()
 		count++
-		if (count >= interval) {
+		if count >= interval {
 			count = 0
 			time.Sleep(time.Millisecond * sleep)
 		}
