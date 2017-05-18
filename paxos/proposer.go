@@ -26,11 +26,13 @@ import (
 type Reply func(*comm.PaxosMsg)
 type Proposer interface {
 	newInstance()
+	getInstanceID() comm.InstanceID
 	setInstanceID(comm.InstanceID)
 	setProposalID(proposalID)
-	newValue(context.Context, []byte) *comm.PaxosMsg
+	newValue(context.Context)
 	onPrepareReply(*comm.PaxosMsg)
 	onAcceptReply(*comm.PaxosMsg)
+	cancelSkipPrepare()
 }
 
 const (
@@ -102,18 +104,20 @@ func (p *proposer) setInstanceID(id comm.InstanceID) {
 	p.instanceID = id
 }
 
-func (p *proposer) newValue(ctx context.Context, done <-chan struct{}, errc chan<- error, value []byte) {
-	if v, ok := ctx.Value("").([]byte); ok {
-		p.state.setValue(v)
+func (p *proposer) newValue(ctx context.Context) {
+	value, ok := ctx.Value("value").([]byte)
+	if !ok {
+		return
 	}
 	p.state.setValue(value)
 	p.prepareTimeout = startPrepareTimeout
 	p.acceptTimeout = startAcceptTimeout
 
+	done := make(chan struct{})
 	if p.skipPrepare && !p.rejected {
-		p.accept(ctx, done, errc)
+		p.accept(ctx, done)
 	} else {
-		p.prepare(ctx, done, errc, p.rejected)
+		p.prepare(ctx, done, p.rejected)
 	}
 	select {
 	case <-ctx.Done():
@@ -123,7 +127,7 @@ func (p *proposer) newValue(ctx context.Context, done <-chan struct{}, errc chan
 	}
 }
 
-func (p *proposer) prepare(ctx context.Context, done <-chan struct{}, errc chan<- error, rejected bool) {
+func (p *proposer) prepare(ctx context.Context, done <-chan struct{}, rejected bool) {
 	p.preparing = true
 	p.accepting = false
 	p.skipPrepare = false
@@ -145,7 +149,7 @@ func (p *proposer) prepare(ctx context.Context, done <-chan struct{}, errc chan<
 	select {
 	case <-ctx.Done():
 	default:
-		go p.broadcastPrepareMessage(ctx, done, errc, msg)
+		go p.broadcastPrepareMessage(ctx, done, msg)
 	}
 }
 
@@ -153,7 +157,7 @@ func (p *proposer) getMajorityCount() int {
 	return p.instance.getMajorityCount()
 }
 
-func (p *proposer) broadcastPrepareMessage(ctx context.Context, done <-chan struct{}, errc chan<- error, msg *comm.PaxosMsg) {
+func (p *proposer) broadcastPrepareMessage(ctx context.Context, done <-chan struct{}, msg *comm.PaxosMsg) {
 	size := p.getMajorityCount()
 	ac, rc := make(chan struct{}, size), make(chan struct{}, size)
 	p.prepareMu.Lock()
@@ -212,16 +216,16 @@ func (p *proposer) broadcastPrepareMessage(ctx context.Context, done <-chan stru
 		if p.prepareTimeout < maxPrepareTimeout {
 			p.prepareTimeout *= 2
 		}
-		go p.prepare(ctx, done, errc, p.rejected)
+		go p.prepare(ctx, done, p.rejected)
 	case <-ac:
 		//accept
 		p.skipPrepare = true
-		p.accept(ctx, done, errc)
+		p.accept(ctx, done)
 	case <-rc:
 		//reject
 		go func() {
 			time.Sleep(time.Millisecond * 30)
-			p.prepare(ctx, done, errc, p.rejected)
+			p.prepare(ctx, done, p.rejected)
 		}()
 	}
 }
@@ -261,7 +265,7 @@ func (p *proposer) isRejected() bool {
 	return len(p.rejectNodes) >= p.getMajorityCount()
 }
 
-func (p *proposer) accept(ctx context.Context, done <-chan struct{}, errc chan<- error) {
+func (p *proposer) accept(ctx context.Context, done <-chan struct{}) {
 	p.preparing = false
 	p.accepting = true
 
@@ -278,11 +282,11 @@ func (p *proposer) accept(ctx context.Context, done <-chan struct{}, errc chan<-
 	select {
 	case <-ctx.Done():
 	default:
-		go p.broadcastAcceptMessage(ctx, done, errc, msg)
+		go p.broadcastAcceptMessage(ctx, done, msg)
 	}
 }
 
-func (p *proposer) broadcastAcceptMessage(ctx context.Context, done <-chan struct{}, errc chan<- error, msg *comm.PaxosMsg) {
+func (p *proposer) broadcastAcceptMessage(ctx context.Context, done <-chan struct{}, msg *comm.PaxosMsg) {
 	size := p.getMajorityCount()
 	ac, rc := make(chan struct{}, size), make(chan struct{}, size)
 	p.acceptMu.Lock()
@@ -346,7 +350,7 @@ func (p *proposer) broadcastAcceptMessage(ctx context.Context, done <-chan struc
 				p.acceptTimeout = d
 			}
 		}
-		go p.prepare(ctx, done, errc, p.rejected)
+		go p.prepare(ctx, done, p.rejected)
 	case <-ac:
 		//accept
 		p.accepting = false
@@ -356,7 +360,7 @@ func (p *proposer) broadcastAcceptMessage(ctx context.Context, done <-chan struc
 		//reject
 		go func() {
 			time.Sleep(time.Millisecond * 30)
-			p.prepare(ctx, done, errc, p.rejected)
+			p.prepare(ctx, done, p.rejected)
 		}()
 	}
 }
