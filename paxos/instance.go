@@ -44,7 +44,7 @@ type Instance interface {
 	newInstance()
 	GetInstanceID() comm.InstanceID
 	getChecksum() checksum
-	NewValue([]byte)
+	NewValue(context.Context)
 	HandleMessage([]byte, int) error
 	AddStateMachine(...node.StateMachine)
 	ReceivePaxosMessage(*comm.PaxosMsg)
@@ -55,6 +55,7 @@ type Instance interface {
 	ContinueCleaner()
 	SetMaxLogCount(int)
 	getMajorityCount() int
+	GetProposerInstanceID() comm.InstanceID
 }
 
 func NewInstance(nodeID comm.NodeID, tp Transporter, st store.Storage,
@@ -92,6 +93,7 @@ type instance struct {
 	learner  Learner
 	cpm      checkpoint.CheckpointManager
 	st       store.Storage
+	ctx context.Context
 }
 
 func (i *instance) Start(ctx context.Context, stopped <-chan struct{}) error {
@@ -176,6 +178,9 @@ func (i *instance) replay(start, end comm.InstanceID) error {
 			return err
 		}
 		// todo: execute statemachine
+		if err = i.execute(id, state.GetAcceptedValue()); err != nil {
+			return err
+		}
 	}
 	return nil
 }
@@ -206,10 +211,10 @@ func (i *instance) newInstance() {
 	i.learner.newInstance()
 }
 
-func (i *instance) NewValue(value []byte) {
-	i.proposer.newValue(value)
+func (i *instance) NewValue(ctx context.Context) {
+	i.ctx = context.WithValue(ctx, "instance_id", i.proposer.getInstanceID())
+	i.proposer.newValue(ctx)
 }
-
 
 func (i *instance) AddStateMachine(sms... node.StateMachine) {
 	for _, sm := range sms {
@@ -219,6 +224,17 @@ func (i *instance) AddStateMachine(sms... node.StateMachine) {
 	}
 }
 
+func compare(a, b []byte) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i, x := range a {
+		if x != b[i] {
+			return false
+		}
+	}
+	return true
+}
 func (i *instance) ReceivePaxosMessage(msg *comm.PaxosMsg) {
 	if i.cpm.IsAskForCheckpoint() {
 		return
@@ -316,6 +332,11 @@ func (i *instance) ReceivePaxosMessage(msg *comm.PaxosMsg) {
 		}
 		i.learner.onAskForCheckpoint(msg)
 		if i.learner.isLearned() {
+			if err := i.execute(i.learner.getInstanceID(), i.learner.getValue()); err != nil {
+				log.Error(err)
+				i.proposer.cancelSkipPrepare()
+				return
+			}
 			i.checksum = i.learner.getChecksum()
 			i.newInstance()
 			i.cpm.SetMaxChosenInstanceID(i.acceptor.getInstanceID())
@@ -357,6 +378,43 @@ func (i *instance) verifyChecksum(msg *comm.PaxosMsg) error {
 	return nil
 }
 
+func (i *instance) execute(instanceID comm.InstanceID, v []byte) error {
+	var smid comm.StateMachineID
+	if err := comm.BytesToObject(v[:comm.SMIDLen], &smid); err != nil {
+		return err
+	}
+	sm, ok := i.sms[smid]
+	if !ok {
+		return errors.New("smid not found")
+	}
+	var (
+		ret interface{}
+		err error
+	)
+	cid, ok := i.ctx.Value("instance_id").(comm.InstanceID)
+	if ok && cid == instanceID {
+		c := make(chan struct{})
+		go func() {
+			ret, err = sm.Execute(i.ctx, instanceID, v[comm.SMIDLen:])
+			close(c)
+		}()
+
+		select {
+		case <-i.ctx.Done():
+			return i.ctx.Err()
+		case <-c:
+			result, ok := i.ctx.Value("result").(chan comm.Result)
+			if ok {
+				result <- comm.Result{ret, err}
+			}
+			return err
+		}
+	} else {
+		_, err = sm.Execute(context.Background(), instanceID, v[comm.SMIDLen:])
+		return err
+	}
+}
+
 func (i *instance) GetCheckpointInstanceID() comm.InstanceID {
 	for _, sm := range i.sms {
 		sm
@@ -386,4 +444,8 @@ func (i *instance) SetMaxLogCount(c int) {
 
 func (i *instance) getMajorityCount() int {
 	return i.group.GetMajorityCount()
+}
+
+func (i *instance) GetProposerInstanceID() comm.InstanceID {
+	return i.proposer.getInstanceID()
 }
