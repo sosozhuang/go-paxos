@@ -15,6 +15,7 @@ package node
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"github.com/sosozhuang/paxos/comm"
 	"github.com/sosozhuang/paxos/election"
@@ -22,34 +23,38 @@ import (
 	"github.com/sosozhuang/paxos/network"
 	"github.com/sosozhuang/paxos/paxos"
 	"github.com/sosozhuang/paxos/store"
+	"math/rand"
+	"net"
+	"strings"
 	"sync"
 	"time"
-	"strings"
-	"strconv"
-	"net"
-	"errors"
 )
 
 const (
-	log = logger.PaxosLogger
+	log           = logger.PaxosLogger
 	maxGroupCount = 1000
+)
+
+var (
+	proposeTimeout   = time.Minute
+	errGroupOutRange = errors.New("group out of range")
 )
 
 type NodeConfig struct {
 	//storage
-	DataDir          string
-	StorageType      string
-	Sync             bool
-	SyncDuration     time.Duration
-	SyncInterval     int
-	DisableWAL       bool
+	DataDir      string
+	StorageType  string
+	Sync         bool
+	SyncDuration time.Duration
+	SyncInterval int
+	DisableWAL   bool
 
 	//network
-	network          string
-	Token            string
-	AdvertiseIP      string
-	ListenIP         string
-	ListenPort       int
+	network     string
+	Token       string
+	AdvertiseIP string
+	ListenIP    string
+	ListenPort  int
 
 	EnableMaster     bool
 	EnableMemberShip bool
@@ -60,13 +65,17 @@ type NodeConfig struct {
 	Peers            string
 
 	//runtime
-	id               comm.NodeID
-	listenAddr       string
-	peersMap         map[comm.NodeID]net.Addr
-
+	id         comm.NodeID
+	clusterID  uint64
+	listenAddr string
+	peersMap   map[comm.NodeID]net.Addr
+	members    map[comm.NodeID]string
 }
 
 func (cfg *NodeConfig) validate() error {
+	if cfg.GroupCount <= 0 {
+		return errors.New("group count should greater than 0")
+	}
 	if cfg.GroupCount > maxGroupCount {
 		return fmt.Errorf("group count %d too large", cfg.GroupCount)
 	}
@@ -82,6 +91,7 @@ func (cfg *NodeConfig) validate() error {
 		return err
 	}
 	cfg.id = id
+	cfg.clusterID = (id ^ rand.Uint32()) + rand.Uint32()
 
 	//currently only tcp network supported
 	cfg.network = "tcp"
@@ -89,6 +99,8 @@ func (cfg *NodeConfig) validate() error {
 
 	peers := strings.Split(cfg.Peers, ",")
 	cfg.peersMap = make(map[comm.NodeID]net.Addr, len(peers))
+	cfg.members = make(map[comm.NodeID]string, len(peers) + 1)
+	cfg.members[cfg.id] = cfg.listenAddr
 	for _, peer := range peers {
 		addr, err := network.ResolveAddr(cfg.network, peer)
 		if err != nil {
@@ -99,28 +111,31 @@ func (cfg *NodeConfig) validate() error {
 			return err
 		}
 		cfg.peersMap[id] = addr
+		cfg.members[id] = peer
 	}
 	if _, ok := cfg.peersMap[cfg.id]; ok {
 		return errors.New("listen addr should not in peers")
 	}
 
+
+
 	return nil
 }
 
 type node struct {
-	cfg           *NodeConfig
-	ready         chan struct{}
-	done          chan struct{}
-	stopped       chan struct{}
-	errChan       chan error
-	wg            sync.WaitGroup
-	storage       store.MultiGroupStorage
-	network       comm.NetWork
-	masters       []election.Master
-	groups        []Group
-	batches       []Batch
-	stateMachines [][]StateMachine
-	transporter   paxos.Transporter
+	cfg     *NodeConfig
+	ready   chan struct{}
+	done    chan struct{}
+	stopped chan struct{}
+	errChan chan error
+	wg      sync.WaitGroup
+	storage store.MultiGroupStorage
+	network comm.NetWork
+	tp      paxos.Transporter
+	masters []election.Master
+	groups  []Group
+	batches []Batch
+	sms     [][]StateMachine
 }
 
 func NewNode(cfg NodeConfig) (n *node, err error) {
@@ -128,9 +143,9 @@ func NewNode(cfg NodeConfig) (n *node, err error) {
 		return nil, err
 	}
 	n = &node{
-		cfg: cfg,
-		ready: make(chan struct{}),
-		done: make(chan struct{}),
+		cfg:     cfg,
+		ready:   make(chan struct{}),
+		done:    make(chan struct{}),
 		stopped: make(chan struct{}),
 		// todo: error chan size gt network,group, master...
 		errChan: make(chan error, 10),
@@ -148,13 +163,13 @@ func NewNode(cfg NodeConfig) (n *node, err error) {
 		return
 	}
 	storageCfg := store.StorageConfig{
-		GroupCount: n.cfg.GroupCount,
-		DataDir: n.cfg.DataDir,
-		Type:    storageType,
-		DisableSync: !n.cfg.Sync,
+		GroupCount:   n.cfg.GroupCount,
+		DataDir:      n.cfg.DataDir,
+		Type:         storageType,
+		DisableSync:  !n.cfg.Sync,
 		SyncDuration: n.cfg.SyncDuration,
 		SyncInterval: n.cfg.SyncInterval,
-		DisableWAL: n.cfg.DisableWAL,
+		DisableWAL:   n.cfg.DisableWAL,
 	}
 	n.storage, err = store.NewDiskStorage(storageCfg)
 	if err != nil {
@@ -163,15 +178,15 @@ func NewNode(cfg NodeConfig) (n *node, err error) {
 	}
 
 	networkCfg := network.NetWorkConfig{
-		NetWork: n.cfg.network,
-		Token: n.cfg.Token,
-		ListenAddr: n.cfg.listenAddr,
+		NetWork:       n.cfg.network,
+		Token:         n.cfg.Token,
+		ListenAddr:    n.cfg.listenAddr,
 		ListenTimeout: 0,
-		ReadTimeout: 0,
+		ReadTimeout:   0,
 		ServerChanCap: 0,
-		DialTimeout: 0,
-		KeepAlive: 0,
-		WriteTimeout: 0,
+		DialTimeout:   0,
+		KeepAlive:     0,
+		WriteTimeout:  0,
 		ClientChanCap: 0,
 	}
 	n.network, err = network.NewPeerNetWork(networkCfg, n)
@@ -191,7 +206,7 @@ func NewNode(cfg NodeConfig) (n *node, err error) {
 		}
 	}
 
-	n.transporter, err = paxos.NewTransporter()
+	n.tp, err = paxos.NewTransporter()
 	if err != nil {
 		log.Error(err)
 		return
@@ -243,8 +258,6 @@ func (n *node) Start() (err error) {
 		}
 	}()
 
-
-
 	go func() {
 		n.wg.Wait()
 		close(n.ready)
@@ -278,16 +291,16 @@ func (n *node) stop() {
 		n.network.Stop()
 	}
 	for _, master := range n.masters {
-
+		master
 	}
 	for _, group := range n.groups {
-
+		group
 	}
 	for _, batch := range n.batches {
-
+		batch
 	}
-	for _, sm := range n.stateMachines {
-
+	for _, sm := range n.sms {
+		sm
 	}
 	close(n.done)
 }
@@ -306,7 +319,7 @@ func (n *node) NotifyError(err error) {
 
 func (n *node) initStateMachine() error {
 	for i, group := range n.groups {
-		group.AddStateMachine(n.stateMachines[i]...)
+		group.AddStateMachines(n.sms[i]...)
 	}
 	if n.cfg.EnableMaster && !n.cfg.FollowerMode {
 		for _, master := range n.masters {
@@ -327,74 +340,77 @@ func (n *node) ReceiveMessage(b []byte) {
 		return
 	}
 	if !n.checkGroupID(groupID) {
-		log.Errorf("group %d out of range\n", groupID)
+		log.Errorf("Group %d out of range.\n", groupID)
 		return
 	}
 	n.groups[groupID].ReceiveMessage(b[comm.GroupIDLen:])
 }
 
-func (n *node) Propose(groupID comm.GroupID, value []byte) error {
-	return n.ProposeWithTimeout(time.Minute, groupID, value)
+func (n *node) Propose(groupID comm.GroupID, smid comm.StateMachineID, value []byte) error {
+	return n.ProposeWithTimeout(groupID, smid, value, proposeTimeout)
 }
 
-func (n *node) ProposeWithTimeout(d time.Duration, groupID comm.GroupID, value []byte) error {
+func (n *node) ProposeWithTimeout(groupID comm.GroupID, smid comm.StateMachineID, value []byte, d time.Duration) error {
+	return n.ProposeWithCtxTimeout(context.Background(), groupID, smid, value, d)
+}
+
+func (n *node) ProposeWithCtx(ctx context.Context, groupID comm.GroupID, smid comm.StateMachineID, value []byte) error {
+	return n.ProposeWithCtxTimeout(ctx, groupID, smid, value, proposeTimeout)
+}
+
+func (n *node) ProposeWithCtxTimeout(ctx context.Context, groupID comm.GroupID, smid comm.StateMachineID, value []byte, d time.Duration) error {
 	if !n.checkGroupID(groupID) {
-		return fmt.Errorf("group %d out of range", groupID)
+		return errGroupOutRange
 	}
 	if d < time.Millisecond {
 		return fmt.Errorf("timeout %v too short", d)
 	}
-	ctx := context.WithValue(context.Background(), "value", value)
 	ctx, cancel := context.WithTimeout(ctx, d)
 	defer cancel()
 
-	stopped, errc, err := n.groups[groupID].Propose(ctx, value)
+	result, err := n.groups[groupID].Propose(ctx, smid, value)
 	if err != nil {
 		return err
 	}
 
 	select {
-	case <- ctx.Done():
+	case <-ctx.Done():
 		return ctx.Err()
-	case <- stopped:
-		return nil
-	case err := <- errc:
-		return err
+	case r := <-result:
+		return r.Err
 	}
 }
-func (n *node) BatchPropose(groupID comm.GroupID, value []byte, batch uint32) error {
-	return n.BatchProposeWithTimeout(time.Minute, groupID, value, batch)
+
+func (n *node) BatchPropose(groupID comm.GroupID, smid comm.StateMachineID, value []byte, batch uint32) error {
+	return n.BatchProposeWithTimeout(groupID, smid, value, batch, proposeTimeout)
 }
-func (n *node) BatchProposeWithTimeout(d time.Duration, groupID uint16, value []byte, batch uint32) error {
+func (n *node) BatchProposeWithTimeout(groupID comm.GroupID, smid comm.StateMachineID, value []byte, batch uint32, d time.Duration) error {
 	if !n.checkGroupID(groupID) {
-		return fmt.Errorf("group %d out of range", groupID)
+		return errGroupOutRange
 	}
 	if d < time.Millisecond {
 		return fmt.Errorf("timeout %v too short", d)
 	}
-	ctx := context.WithValue(context.Background(), "value", value)
-	ctx = context.WithValue(ctx, "batch", batch)
+	ctx := context.WithValue(context.Background(), "batch", batch)
 	ctx, cancel := context.WithTimeout(ctx, d)
 	defer cancel()
 
-	stopped, errc, err := n.groups[groupID].BatchPropose(ctx, value, batch)
+	result, err := n.groups[groupID].BatchPropose(ctx, smid, value, batch)
 	if err != nil {
 		return err
 	}
 
 	select {
-	case <- ctx.Done():
+	case <-ctx.Done():
 		return ctx.Err()
-	case <- stopped:
-		return nil
-	case err := <- errc:
-		return err
+	case r := <-result:
+		return r.Err
 	}
 }
 
-func (n *node) CurrentInstanceID(groupID comm.GroupID) (comm.InstanceID, error) {
+func (n *node) GetCurrentInstanceID(groupID comm.GroupID) (comm.InstanceID, error) {
 	if !n.checkGroupID(groupID) {
-		return comm.InstanceID(0), fmt.Errorf("group %d out of range", groupID)
+		return 0, errGroupOutRange
 	}
 	return n.groups[groupID].GetCurrentInstanceID()
 }
@@ -411,7 +427,7 @@ func (n *node) GetGroupCount() int {
 	return n.cfg.GroupCount
 }
 
-func (n *node) MemberShipEnabled() bool {
+func (n *node) IsEnableMemberShip() bool {
 	return n.cfg.EnableMemberShip
 }
 
@@ -423,86 +439,155 @@ func (n *node) GetFollowNodeID() comm.NodeID {
 	return n.cfg.FollowNodeID
 }
 
-func (n *node) handleMessage(msg []byte, length int) error {
-	group := uint16(0)
-	if !n.checkGroupID(group) {
-		return fmt.Errorf("group %d out of range", group)
-	}
-	return n.groups[group].HandleMessage(msg, length)
+func (n *node) SetProposeTimeout(d time.Duration) {
+	proposeTimeout = d
 }
 
-func (n *node) SetTimeout(d time.Duration) {
+func (n *node) SetMaxLogCount(c int) {
 	for _, group := range n.groups {
-		group.SetTimeout(d)
+		group.SetMaxLogCount(c)
 	}
 }
 
-func (n *node) SetMaxLogCount(c uint64) {
+func (n *node) PauseReplayer() {
 	for _, group := range n.groups {
-		group.Cleaner().SetMaxLogCount(c)
+		group.PauseReplayer()
 	}
 }
 
-func (n *node) PauseCheckpointReplayer() {
+func (n *node) ContinueReplayer() {
 	for _, group := range n.groups {
-		group.Replayer().Pause()
+		group.ContinueReplayer()
 	}
 }
 
-func (n *node) ContinueCheckpointReplayer() {
+func (n *node) PauseCleaner() {
 	for _, group := range n.groups {
-		group.Replayer().Continue()
+		group.PauseCleaner()
 	}
 }
 
-func (n *node) PausePaxosLogCleaner() {
+func (n *node) ContinueCleaner() {
 	for _, group := range n.groups {
-		group.Cleaner().Pause()
+		group.ContinueCleaner()
 	}
 }
 
-func (n *node) ContinuePaxosLogCleaner() {
-	for _, group := range n.groups {
-		group.Cleaner().Continue()
-	}
-}
-
-func (n *node) AddMember(group uint16, peer Node) error {
-	return nil
-}
-
-func (n *node) RemoveMember(group uint16, peer Node) error {
-	return nil
-}
-
-func (n *node) ChangeMember(group uint16, from Node, to Node) error {
-	return nil
-}
-
-func (n *node) ShowMemberShip(group uint16) error {
-	return nil
-}
-
-func (n *node) GetMasterNode(groupID comm.GroupID) (Node, error) {
+func (n *node) AddMember(groupID comm.GroupID, ip string, port int) error {
 	if !n.checkGroupID(groupID) {
-		return nil, fmt.Errorf("group %d out of range", groupID)
+		return errGroupOutRange
 	}
-	return n.masters[groupID], nil
+
+	nodeID, err := network.AddrToInt64(ip, port)
+	if err != nil {
+		return err
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), proposeTimeout)
+	defer cancel()
+
+	result, err := n.groups[groupID].AddMember(ctx, nodeID, fmt.Sprintf("%s:%d", ip, port))
+	if err != nil {
+		return err
+	}
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case r := <-result:
+		return r.Err
+	}
 }
 
-func (n *node) MasterNodeWithVersion(groupID comm.GroupID, version uint64) Node {
-	return nil
+func (n *node) RemoveMember(groupID comm.GroupID, ip string, port int) error {
+	if !n.checkGroupID(groupID) {
+		return errGroupOutRange
+	}
+	nodeID, err := network.AddrToInt64(ip, port)
+	if err != nil {
+		return err
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), proposeTimeout)
+	defer cancel()
+
+	result, err := n.groups[groupID].RemoveMember(ctx, nodeID)
+	if err != nil {
+		return err
+	}
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case r := <-result:
+		return r.Err
+	}
 }
 
-func (n *node) IsMasterNode(groupID comm.GroupID) bool {
-	return false
+func (n *node) ChangeMember(groupID comm.GroupID, dstip string, dstport int, srcip string, srcport int) error {
+	if !n.checkGroupID(groupID) {
+		return errGroupOutRange
+	}
+	dst, err := network.AddrToInt64(dstip, dstport)
+	if err != nil {
+		return err
+	}
+	src, err := network.AddrToInt64(srcip, srcport)
+	if err != nil {
+		return err
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), proposeTimeout)
+	defer cancel()
+
+	result, err := n.groups[groupID].ChangeMember(ctx, dst, fmt.Sprintf("%s:%d", dstip, dstport), src)
+	if err != nil {
+		return err
+	}
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case r := <-result:
+		return r.Err
+	}
 }
 
-func (n *node) SetMasterLeaseTime(groupID comm.GroupID, duration time.Duration) error {
+//func (n *node) ShowMemberShip(groupID comm.GroupID) error {
+//	if !n.checkGroupID(groupID) {
+//		return errGroupOutRange
+//	}
+//	return nil
+//}
+//
+//func (n *node) GetMasterNode(groupID comm.GroupID) (Node, error) {
+//	if !n.checkGroupID(groupID) {
+//		return nil, fmt.Errorf("group %d out of range", groupID)
+//	}
+//	return n.masters[groupID], nil
+//}
+//
+//func (n *node) MasterNodeWithVersion(groupID comm.GroupID, version uint64) Node {
+//	if !n.checkGroupID(groupID) {
+//		return errGroupOutRange
+//	}
+//	return nil
+//}
+//
+//func (n *node) IsMasterNode(groupID comm.GroupID) bool {
+//	if !n.checkGroupID(groupID) {
+//		return errGroupOutRange
+//	}
+//	return false
+//}
+
+func (n *node) SetMasterLeaseTime(groupID comm.GroupID, d time.Duration) error {
+	if !n.checkGroupID(groupID) {
+		return errGroupOutRange
+	}
+	n.masters[groupID].SetLeaseTime(d)
 	return nil
 }
 
 func (n *node) GiveUpMasterElection(groupID comm.GroupID) error {
+	if !n.checkGroupID(groupID) {
+		return errGroupOutRange
+	}
+	n.masters[groupID].GiveUp()
 	return nil
 }
 
@@ -514,15 +599,14 @@ func (n *node) SetProposeWaitTimeThreshold(groupID comm.GroupID, duration time.D
 	return nil
 }
 
-func (n *node) SetLogSync(groupID comm.GroupID, sync bool) error {
+func (n *node) SetSync(groupID comm.GroupID, sync bool) error {
+	if !n.checkGroupID(groupID) {
+		return errGroupOutRange
+	}
 	return nil
 }
 
-func (n *node) GetInstanceValue(groupID comm.GroupID, instance paxos.InstanceID) ([][]byte, error) {
-	return make([][]byte, 0), nil
-}
-
-func (n *node) SetBatchCount(groupID comm.GroupID, count uint16) error {
+func (n *node) SetBatchCount(groupID comm.GroupID, count int) error {
 	return nil
 }
 
