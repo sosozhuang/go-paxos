@@ -22,29 +22,30 @@ import (
 	"path"
 	"strings"
 	"syscall"
+	"sync/atomic"
 )
 
-type Receiver interface {
-	Prepare(comm.NodeID, uint64) error
-	Reset()
-	GetTmpDir(comm.StateMachineID) string
-	Receive(*comm.CheckpointMsg) error
-	IsFinished(comm.NodeID, uint64, uint64) bool
-}
+//type Receiver interface {
+//	Prepare(comm.NodeID, uint64) error
+//	Reset()
+//	GetTmpDir(comm.StateMachineID) string
+//	Receive(*comm.CheckpointMsg) error
+//	IsFinished(comm.NodeID, uint64, uint64) bool
+//}
 
-type receiver struct {
+type Receiver struct {
 	nodeID   comm.NodeID
-	uuid     uint64
-	sequence uint64
+	uuid
+	sequence
 	dirs     map[string]struct{}
-	st       store.Storage
+	store.Storage
 }
 
-func (r *receiver) Prepare(nodeID comm.NodeID, uuid uint64) error {
+func (r *Receiver) Prepare(nodeID comm.NodeID, uuid uuid) error {
 	if err := r.removeTmpDir(); err != nil {
 		return err
 	}
-	if err := r.st.Recreate(); err != nil {
+	if err := r.Storage.Recreate(); err != nil {
 		return err
 	}
 
@@ -55,15 +56,15 @@ func (r *receiver) Prepare(nodeID comm.NodeID, uuid uint64) error {
 	return nil
 }
 
-func (r *receiver) Reset() {
+func (r *Receiver) Reset() {
 	r.nodeID = comm.UnknownNodeID
 	r.uuid = 0
 	r.sequence = 0
 	r.dirs = make(map[string]struct{})
 }
 
-func (r *receiver) removeTmpDir() error {
-	d, err := os.Open(r.st.GetDir())
+func (r *Receiver) removeTmpDir() error {
+	d, err := os.Open(r.Storage.GetDir())
 	if err != nil {
 		return err
 	}
@@ -82,15 +83,15 @@ func (r *receiver) removeTmpDir() error {
 	return nil
 }
 
-func (r *receiver) IsFinished(nodeID comm.NodeID, uuid, sequence uint64) bool {
-	return r.nodeID == nodeID && r.uuid == uuid && r.sequence+1 == sequence
+func (r *Receiver) IsFinished(nodeID comm.NodeID, uuid uuid, seq sequence) bool {
+	return r.nodeID == nodeID && r.uuid == uuid && r.sequence+1 == seq
 }
 
-func (r *receiver) GetTmpDir(id comm.StateMachineID) string {
-	return path.Join(r.st.GetDir(), fmt.Sprintf("cp_tmp_%d", id))
+func (r *Receiver) GetTmpDir(id comm.StateMachineID) string {
+	return path.Join(r.Storage.GetDir(), fmt.Sprintf("cp_tmp_%d", id))
 }
 
-func (r *receiver) initFilePath(filename string) error {
+func (r *Receiver) initFilePath(filename string) error {
 	dir := path.Dir(filename)
 	if _, ok := r.dirs[dir]; ok {
 		return nil
@@ -102,7 +103,7 @@ func (r *receiver) initFilePath(filename string) error {
 	return nil
 }
 
-func (r *receiver) Receive(msg *comm.CheckpointMsg) error {
+func (r *Receiver) Receive(msg *comm.CheckpointMsg) error {
 	if msg.GetNodeID() != r.nodeID || msg.GetUUID() != r.uuid {
 		return errors.New("invalid checkpoint msg")
 	}
@@ -135,6 +136,6 @@ func (r *receiver) Receive(msg *comm.CheckpointMsg) error {
 	if n != len(msg.GetBuffer()) {
 		return errors.New("write failed")
 	}
-	r.sequence += 1
+	atomic.AddUint64(&r.sequence, 1)
 	return nil
 }
