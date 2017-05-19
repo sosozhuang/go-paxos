@@ -15,6 +15,8 @@ package paxos
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"github.com/gogo/protobuf/proto"
 	"github.com/sosozhuang/paxos/checkpoint"
 	"github.com/sosozhuang/paxos/comm"
@@ -22,8 +24,7 @@ import (
 	"github.com/sosozhuang/paxos/node"
 	"github.com/sosozhuang/paxos/store"
 	"time"
-	"fmt"
-	"errors"
+	"container/heap"
 )
 
 const (
@@ -58,12 +59,30 @@ type Instance interface {
 	GetProposerInstanceID() comm.InstanceID
 }
 
+type instance struct {
+	checksum
+	sms      map[comm.StateMachineID]node.StateMachine
+	group    node.Group
+	proposer Proposer
+	acceptor Acceptor
+	learner  Learner
+	cpm      checkpoint.CheckpointManager
+	st       store.Storage
+	ctx      context.Context
+	ch       chan *comm.PaxosMsg
+	retries  *msgHeap
+}
+
 func NewInstance(nodeID comm.NodeID, tp Transporter, st store.Storage,
 	enableReplayer bool) (Instance, error) {
 	var err error
 	i := &instance{
 		sms: make(map[comm.StateMachineID]node.StateMachine),
+		ctx: context.TODO(),
+		ch: make(chan *comm.PaxosMsg, 10),
+		retries: &msgHeap{},
 	}
+	heap.Init(i.retries)
 
 	i.acceptor, err = newAcceptor(nodeID, i, tp, st)
 	if err != nil {
@@ -82,18 +101,6 @@ func NewInstance(nodeID comm.NodeID, tp Transporter, st store.Storage,
 		return nil, err
 	}
 	return i, nil
-}
-
-type instance struct {
-	checksum
-	sms      map[comm.StateMachineID]node.StateMachine
-	group    node.Group
-	proposer Proposer
-	acceptor Acceptor
-	learner  Learner
-	cpm      checkpoint.CheckpointManager
-	st       store.Storage
-	ctx context.Context
 }
 
 func (i *instance) Start(ctx context.Context, stopped <-chan struct{}) error {
@@ -138,7 +145,7 @@ func (i *instance) Stop() {
 		i.cpm.Stop()
 	}
 	if i.learner != nil {
-		i.learner.Stop()
+		i.learner.stop()
 	}
 }
 
@@ -148,7 +155,7 @@ func (i *instance) initChecksum() error {
 		i.checksum = 0
 		return nil
 	}
-	value, err := i.st.Get(i.acceptor.getInstanceID()-1)
+	value, err := i.st.Get(i.acceptor.getInstanceID() - 1)
 	if err == store.ErrNotFound {
 		i.checksum = 0
 		return nil
@@ -169,7 +176,7 @@ func (i *instance) replay(start, end comm.InstanceID) error {
 		return fmt.Errorf("%d%d", start, i.cpm.GetMinChosenInstanceID())
 	}
 	var state comm.AcceptorStateData
-	for id := start; id < end; id += 1 {
+	for id := start; id < end; id++ {
 		b, err := i.st.Get(id)
 		if err != nil {
 			return err
@@ -216,7 +223,7 @@ func (i *instance) NewValue(ctx context.Context) {
 	i.proposer.newValue(ctx)
 }
 
-func (i *instance) AddStateMachine(sms... node.StateMachine) {
+func (i *instance) AddStateMachine(sms ...node.StateMachine) {
 	for _, sm := range sms {
 		if _, ok := i.sms[sm.GetStateMachineID()]; !ok {
 			i.sms[sm.GetStateMachineID()] = sm
@@ -235,6 +242,58 @@ func compare(a, b []byte) bool {
 	}
 	return true
 }
+
+type msgHeap []*comm.PaxosMsg
+
+func (h *msgHeap) Len() int {
+	return len(h)
+}
+func (h *msgHeap) Less(i, j int) bool {
+	return h[i].GetInstanceID() < h[j].GetInstanceID()
+}
+func (h *msgHeap) Swap(i, j int) {
+	h[i], h[j] = h[j], h[i]
+}
+func (h *msgHeap) Push(x interface{}) {
+	*h = append(*h, x.(*comm.PaxosMsg))
+}
+func (h *msgHeap) Pop() interface{} {
+	old := *h
+	n := len(old)
+	x := old[n-1]
+	*h = old[0 : n-1]
+	return x
+}
+
+func (i *instance) handleRetry() {
+	ticker := time.NewTicker(time.Second)
+	defer ticker.Stop()
+	for {
+		select {
+		case <- ticker.C:
+			i.retryPaxosMessage()
+		case msg := <- i.ch:
+			heap.Push(i.retries, msg)
+		}
+	}
+}
+
+func (i *instance) retryPaxosMessage() {
+	for i.retries.Len() > 0 {
+		msg := heap.Pop(i.retries).(*comm.PaxosMsg)
+		if msg.GetInstanceID() == i.GetInstanceID() {
+			i.ReceivePaxosMessage(msg)
+		} else {
+			heap.Push(i.retries, msg)
+			break
+		}
+
+	}
+	if i.retries.Len() > 300 {
+		i.retries = &msgHeap{}
+	}
+}
+
 func (i *instance) ReceivePaxosMessage(msg *comm.PaxosMsg) {
 	if i.cpm.IsAskForCheckpoint() {
 		return
@@ -250,20 +309,30 @@ func (i *instance) ReceivePaxosMessage(msg *comm.PaxosMsg) {
 		if err := i.verifyChecksum(msg); err != nil {
 			return
 		}
-		if msg.GetInstanceID() == i.acceptor.getInstanceID() {
+		if msg.GetInstanceID() == i.acceptor.getInstanceID() ||
+			msg.GetInstanceID() == i.acceptor.getInstanceID()+1 {
 			i.acceptor.onPrepare(msg)
 		} else if msg.GetInstanceID() > i.acceptor.getInstanceID() {
-
+			if msg.GetInstanceID() >= i.learner.getLastSeenInstanceID() {
+				if msg.GetInstanceID() < i.acceptor.getInstanceID()+300 {
+					i.ch <- msg
+				}
+			}
 		}
 
 	case comm.PaxosMsgType_Accept:
 		if err := i.verifyChecksum(msg); err != nil {
 			return
 		}
-		if msg.GetInstanceID() == i.acceptor.getInstanceID() {
+		if msg.GetInstanceID() == i.acceptor.getInstanceID() ||
+			msg.GetInstanceID() == i.acceptor.getInstanceID()+1 {
 			i.acceptor.onAccept(msg)
 		} else if msg.GetInstanceID() > i.acceptor.getInstanceID() {
-
+			if msg.GetInstanceID() >= i.learner.getLastSeenInstanceID() {
+				if msg.GetInstanceID() < i.acceptor.getInstanceID()+300 {
+					i.ch <- msg
+				}
+			}
 		}
 
 	case comm.PaxosMsgType_AskForLearn:
@@ -271,66 +340,16 @@ func (i *instance) ReceivePaxosMessage(msg *comm.PaxosMsg) {
 			return
 		}
 		i.learner.onAskForLearn(msg)
-		if i.learner.isLearned() {
-			i.checksum = i.learner.getChecksum()
-			i.newInstance()
-			i.cpm.SetMaxChosenInstanceID(i.acceptor.getInstanceID())
-		}
 	case comm.PaxosMsgType_ConfirmAskForLearn:
 		if err := i.verifyChecksum(msg); err != nil {
 			return
 		}
 		i.learner.onConfirmAskForLearn(msg)
-		if i.learner.isLearned() {
-			i.checksum = i.learner.getChecksum()
-			i.newInstance()
-			i.cpm.SetMaxChosenInstanceID(i.acceptor.getInstanceID())
-		}
 	case comm.PaxosMsgType_ProposalFinished:
 		if err := i.verifyChecksum(msg); err != nil {
 			return
 		}
 		i.learner.onProposalFinished(msg)
-		if i.learner.isLearned() {
-			i.checksum = i.learner.getChecksum()
-			i.newInstance()
-			i.cpm.SetMaxChosenInstanceID(i.acceptor.getInstanceID())
-		}
-	case comm.PaxosMsgType_SendValue:
-		if err := i.verifyChecksum(msg); err != nil {
-			return
-		}
-		i.learner.onSendValue(msg)
-		if i.learner.isLearned() {
-			i.checksum = i.learner.getChecksum()
-			i.newInstance()
-			i.cpm.SetMaxChosenInstanceID(i.acceptor.getInstanceID())
-		}
-	case comm.PaxosMsgType_SendInstanceID:
-		if err := i.verifyChecksum(msg); err != nil {
-			return
-		}
-		i.learner.onSendInstanceID(msg)
-		if i.learner.isLearned() {
-			i.checksum = i.learner.getChecksum()
-			i.newInstance()
-			i.cpm.SetMaxChosenInstanceID(i.acceptor.getInstanceID())
-		}
-	case comm.PaxosMsgType_AckSendValue:
-		if err := i.verifyChecksum(msg); err != nil {
-			return
-		}
-		i.learner.onAckSendValue(msg)
-		if i.learner.isLearned() {
-			i.checksum = i.learner.getChecksum()
-			i.newInstance()
-			i.cpm.SetMaxChosenInstanceID(i.acceptor.getInstanceID())
-		}
-	case comm.PaxosMsgType_AskForCheckpoint:
-		if err := i.verifyChecksum(msg); err != nil {
-			return
-		}
-		i.learner.onAskForCheckpoint(msg)
 		if i.learner.isLearned() {
 			if err := i.execute(i.learner.getInstanceID(), i.learner.getValue()); err != nil {
 				log.Error(err)
@@ -341,6 +360,36 @@ func (i *instance) ReceivePaxosMessage(msg *comm.PaxosMsg) {
 			i.newInstance()
 			i.cpm.SetMaxChosenInstanceID(i.acceptor.getInstanceID())
 		}
+	case comm.PaxosMsgType_SendValue:
+		if err := i.verifyChecksum(msg); err != nil {
+			return
+		}
+		i.learner.onSendValue(msg)
+		if i.learner.isLearned() {
+			if err := i.execute(i.learner.getInstanceID(), i.learner.getValue()); err != nil {
+				log.Error(err)
+				i.proposer.cancelSkipPrepare()
+				return
+			}
+			i.checksum = i.learner.getChecksum()
+			i.newInstance()
+			i.cpm.SetMaxChosenInstanceID(i.acceptor.getInstanceID())
+		}
+	case comm.PaxosMsgType_SendInstanceID:
+		if err := i.verifyChecksum(msg); err != nil {
+			return
+		}
+		i.learner.onSendInstanceID(msg)
+	case comm.PaxosMsgType_AckSendValue:
+		if err := i.verifyChecksum(msg); err != nil {
+			return
+		}
+		i.learner.onAckSendValue(msg)
+	case comm.PaxosMsgType_AskForCheckpoint:
+		if err := i.verifyChecksum(msg); err != nil {
+			return
+		}
+		i.learner.onAskForCheckpoint(msg)
 	default:
 		log.Errorf("Unknown paxos message type %v.\n", msg.GetType())
 		return
