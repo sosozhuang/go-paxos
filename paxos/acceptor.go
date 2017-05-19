@@ -39,6 +39,14 @@ type Acceptor interface {
 	onAccept(*comm.PaxosMsg)
 }
 
+type acceptor struct {
+	nodeID     comm.NodeID
+	instanceID comm.InstanceID
+	instance   Instance
+	tp         Transporter
+	state      acceptorState
+}
+
 func newAcceptor(nodeID comm.NodeID, instance Instance, tp Transporter, st store.Storage) (Acceptor, error) {
 	s := acceptorState{
 		st: st,
@@ -50,14 +58,6 @@ func newAcceptor(nodeID comm.NodeID, instance Instance, tp Transporter, st store
 		state:      s,
 	}
 	return a, nil
-}
-
-type acceptor struct {
-	nodeID     comm.NodeID
-	instanceID comm.InstanceID
-	instance   Instance
-	tp         Transporter
-	state      acceptorState
 }
 
 func (a *acceptor) start() (err error) {
@@ -84,6 +84,10 @@ func (a *acceptor) setInstanceID(id comm.InstanceID) {
 
 func (a *acceptor) getPromisedProposalID() proposalID {
 	return a.state.promisedBallot.proposalID
+}
+
+func (a *acceptor) getAcceptorState() acceptorState {
+	return a.state
 }
 
 func (a *acceptor) onPrepare(msg *comm.PaxosMsg) {
@@ -162,11 +166,11 @@ func (a *acceptorState) reset() {
 	a.checksum = 0
 }
 
-func (a *acceptorState) save(instanceID comm.InstanceID, checksum checksum) error {
-	if instanceID > 0 && checksum == 0 {
+func (a *acceptorState) save(instanceID comm.InstanceID, cs checksum) error {
+	if instanceID > 0 && cs == 0 {
 		a.checksum = 0
 	} else if len(a.acceptedValue) > 0 {
-		a.checksum = crc32.Update(checksum, crcTable, a.acceptedValue)
+		a.checksum = crc32.Update(cs, crcTable, a.acceptedValue)
 	}
 
 	state := &comm.AcceptorStateData{
