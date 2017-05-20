@@ -18,7 +18,7 @@ import (
 	"context"
 	"encoding/binary"
 	"unsafe"
-	"net"
+	"time"
 )
 
 type Receiver interface {
@@ -38,26 +38,39 @@ type NetWork interface {
 type Node interface {
 	NotifyStop() <-chan struct{}
 	NotifyError(err error)
-	Propose(GroupID, []byte, InstanceID) error
-	ProposeWithCtx(context.Context, GroupID, []byte, InstanceID) error
-	BatchPropose(GroupID, []byte, InstanceID, uint32) error
-	BatchProposeWithCtx(context.Context, GroupID, []byte, InstanceID, uint32) error
-	CurrentInstanceID(GroupID) InstanceID
+	Propose(GroupID, StateMachineID, []byte) error
+	ProposeWithTimeout(GroupID, StateMachineID, []byte, time.Duration) error
+	ProposeWithCtx(context.Context, GroupID, StateMachineID, []byte) error
+	ProposeWithCtxTimeout(context.Context, GroupID, StateMachineID, []byte, time.Duration) error
 	GetNodeID() NodeID
-	GetNodeCount() int
-	GetListenAddr() *net.TCPAddr
 
 	ReceiveMessage([]byte)
+}
+
+type StateMachine interface {
+	Execute(context.Context, InstanceID, []byte) (interface{}, error)
+	GetStateMachineID() StateMachineID
+	ExecuteForCheckpoint(InstanceID, []byte) error
+	GetCheckpointInstanceID() InstanceID
+	//LockCheckpointState() error
+	//UnLockCheckpointState()
+	//CheckpointState() error
+	//LoadCheckpointState() error
 }
 
 type NodeID uint64
 type GroupID uint16
 type InstanceID uint64
 type StateMachineID uint64
+type Result struct {
+	Ret interface{}
+	Err error
+}
 
 const (
-	UnknownNodeID = NodeID(0)
+	UnknownNodeID = 0
 	GroupIDLen = int(unsafe.Sizeof(GroupID(0)))
+	SMIDLen = int(unsafe.Sizeof(StateMachineID(0)))
 	Int32Len = int(unsafe.Sizeof(int32(0)))
 )
 
@@ -90,4 +103,60 @@ func BytesToInt(b []byte) (int, error) {
 		return 0, err
 	}
 	return int(n), nil
+}
+
+type Group interface {
+	Start(context.Context, <-chan struct{}) error
+	Stop()
+	Propose(context.Context, StateMachineID, []byte) (<-chan Result, error)
+	BatchPropose(context.Context, StateMachineID, []byte, uint32) (<-chan Result, error)
+	FollowerMode() bool
+	FollowNodeID() NodeID
+	EnableMemberShip() bool
+	AddStateMachines(...StateMachine)
+	ReceiveMessage([]byte)
+	GetCurrentInstanceID() InstanceID
+	PauseReplayer()
+	ContinueReplayer()
+	PauseCleaner()
+	ContinueCleaner()
+	SetMaxLogCount(int)
+	GetGroupID() GroupID
+	GetClusterID() uint64
+	GetMajorityCount() int
+	GetLearnNodes() map[NodeID]string
+	GetMembers() map[NodeID]string
+	AddMember(context.Context, NodeID, string) (<-chan Result, error)
+	RemoveMember(context.Context, NodeID) (<-chan Result, error)
+	ChangeMember(context.Context, NodeID, string, NodeID) (<-chan Result, error)
+	GetFollowers() map[NodeID]string
+	AddFollower(NodeID)
+}
+
+type Checksum uint32
+
+type Instance interface {
+	Start(context.Context, <-chan struct{}) error
+	Stop()
+	IsReadyForNewValue() bool
+	GetInstanceID() InstanceID
+	GetChecksum() Checksum
+	NewValue(context.Context)
+	AddStateMachine(...StateMachine)
+	ReceivePaxosMessage(*PaxosMsg)
+	ReceiveCheckpointMessage(*CheckpointMsg)
+	PauseReplayer()
+	ContinueReplayer()
+	PauseCleaner()
+	ContinueCleaner()
+	SetMaxLogCount(int)
+	GetMajorityCount() int
+	GetProposerInstanceID() InstanceID
+	GetCheckpointInstanceID() InstanceID
+	ExecuteForCheckpoint(InstanceID, []byte) error
+}
+
+type Learner interface {
+	SendCheckpointBegin(NodeID, uint64, uint64, InstanceID)
+	SendCheckpointEnd(NodeID, uint64, uint64, InstanceID)
 }
