@@ -11,7 +11,7 @@
 // WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 // See the License for the specific language governing permissions and
 // limitations under the License.
-package paxos1
+package paxos
 
 import (
 	"github.com/gogo/protobuf/proto"
@@ -20,34 +20,34 @@ import (
 )
 
 type Transporter interface {
-	send(comm.NodeID, comm.MsgType, proto.Message)
+	send(uint64, comm.MsgType, proto.Message)
 	broadcast(comm.MsgType, proto.Message)
 	broadcastToFollowers(comm.MsgType, proto.Message)
 	broadcastToLearnNodes(comm.MsgType, proto.Message)
 }
 
 type transporter struct {
-	nodeID comm.NodeID
-	group  comm.Group
-	sender comm.Sender
+	nodeID   uint64
+	groupCfg comm.GroupConfig
+	sender   comm.Sender
 }
 
-func NewTransporter(nodeID comm.NodeID, group comm.Group, sender comm.Sender) (Transporter, error) {
+func NewTransporter(nodeID uint64, groupCfg comm.GroupConfig, sender comm.Sender) (Transporter, error) {
 	return &transporter{
 		nodeID: nodeID,
-		group: group,
+		groupCfg: groupCfg,
 		sender: sender,
 	}, nil
 }
 
-func (t *transporter) send(nodeID comm.NodeID, msgType comm.MsgType, msg proto.Message) {
+func (t *transporter) send(nodeID uint64, msgType comm.MsgType, msg proto.Message) {
 	b, err := t.pack(msgType, msg)
 	if err != nil {
 		log.Error(err)
 		return
 	}
 
-	addr, ok := t.group.GetMembers()[nodeID]
+	addr, ok := t.groupCfg.GetMembers()[nodeID]
 	if !ok {
 		log.Error("can't find node")
 		return
@@ -57,11 +57,11 @@ func (t *transporter) send(nodeID comm.NodeID, msgType comm.MsgType, msg proto.M
 
 func (t *transporter) pack(msgType comm.MsgType, pb proto.Message) ([]byte, error) {
 	header := &comm.Header{
-		ClusterID: proto.Uint64(t.group.GetClusterID()),
+		ClusterID: proto.Uint64(t.groupCfg.GetClusterID()),
 		Type:      msgType.Enum(),
 		Version:   proto.Int32(1),
 	}
-	b, err := comm.ObjectToBytes(t.group.GetGroupID())
+	b, err := comm.ObjectToBytes(t.groupCfg.GetGroupID())
 	if err != nil {
 		return nil, err
 	}
@@ -101,7 +101,7 @@ func (t *transporter) broadcast(msgType comm.MsgType, msg proto.Message) {
 		return
 	}
 
-	members := t.group.GetMembers()
+	members := t.groupCfg.GetMembers()
 	for id, addr := range members {
 		if id != t.nodeID {
 			if err = t.sender.SendMessage(addr, b); err != nil {
@@ -118,7 +118,7 @@ func (t *transporter) broadcastToFollowers(msgType comm.MsgType, msg proto.Messa
 		return
 	}
 
-	followers := t.group.GetFollowers()
+	followers := t.groupCfg.GetFollowers()
 	for _, addr := range followers {
 		if err = t.sender.SendMessage(addr, b); err != nil {
 			log.Error(err)
@@ -133,7 +133,7 @@ func (t *transporter) broadcastToLearnNodes(msgType comm.MsgType, msg proto.Mess
 		return
 	}
 
-	nodes := t.group.GetLearnNodes()
+	nodes := t.groupCfg.GetLearnNodes()
 	for _, addr := range nodes {
 		if err = t.sender.SendMessage(addr, b); err != nil {
 			log.Error(err)
