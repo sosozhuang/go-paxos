@@ -11,7 +11,7 @@
 // WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 // See the License for the specific language governing permissions and
 // limitations under the License.
-package paxos1
+package paxos
 
 import (
 	"container/heap"
@@ -31,12 +31,10 @@ var (
 	errChecksumFailed = errors.New("checksum failed")
 )
 
-type proposalID uint64
-
 type instance struct {
-	checksum comm.Checksum
-	sms      map[comm.StateMachineID]comm.StateMachine
-	group    comm.Group
+	checksum uint32
+	sms      map[uint32]comm.StateMachine
+	groupCfg comm.GroupConfig
 	proposer Proposer
 	acceptor Acceptor
 	learner  Learner
@@ -47,31 +45,23 @@ type instance struct {
 	retries  *msgHeap
 }
 
-func NewInstance(nodeID comm.NodeID, tp Transporter, st store.Storage,
-	enableReplayer bool, group comm.Group) (comm.Instance, error) {
+func NewInstance(nodeID uint64, tp Transporter, st store.Storage,
+	enableReplayer bool, groupCfg comm.GroupConfig) (comm.Instance, error) {
 	var err error
 	i := &instance{
-		group:   group,
-		sms:     make(map[comm.StateMachineID]comm.StateMachine),
+		groupCfg:   groupCfg,
+		sms:     make(map[uint32]comm.StateMachine),
 		ctx:     context.TODO(),
 		ch:      make(chan *comm.PaxosMsg, 10),
 		retries: &msgHeap{},
 	}
 	heap.Init(i.retries)
 
-	i.acceptor, err = newAcceptor(nodeID, i, tp, st)
-	if err != nil {
-		return nil, err
-	}
+	i.acceptor = newAcceptor(nodeID, i, tp, st)
+	i.learner = newLearner(nodeID, groupCfg, i, tp, st, i.acceptor, i.cpm)
+	i.proposer = newProposer(nodeID, i, tp, i.learner)
 
-	i.learner, err = newLearner(nodeID, i, tp, st, i.acceptor, i.cpm)
-	if err != nil {
-		return nil, err
-	}
-
-	i.proposer = newProposer(nodeID, group.GetGroupID(), tp, i.learner, time.Second, time.Second)
-
-	i.cpm, err = checkpoint.NewCheckpointManager(enableReplayer, st)
+	i.cpm, err = checkpoint.NewCheckpointManager(enableReplayer, st, groupCfg)
 	if err != nil {
 		return nil, err
 	}
@@ -79,7 +69,7 @@ func NewInstance(nodeID comm.NodeID, tp Transporter, st store.Storage,
 }
 
 func (i *instance) Start(ctx context.Context, stopped <-chan struct{}) error {
-	i.learner.start()
+	i.learner.start(stopped)
 	if err := i.acceptor.start(); err != nil {
 		return err
 	}
@@ -106,7 +96,6 @@ func (i *instance) Start(ctx context.Context, stopped <-chan struct{}) error {
 		return err
 	}
 
-	i.learner.setStopped(stopped)
 	i.learner.AskForLearn(time.Second * 3)
 
 	if err := i.cpm.Start(ctx, stopped); err != nil {
@@ -143,11 +132,11 @@ func (i *instance) initChecksum() error {
 	if err := proto.Unmarshal(value, &state); err != nil {
 		return err
 	}
-	i.checksum = comm.Checksum(state.GetChecksum())
+	i.checksum = state.GetChecksum()
 	return nil
 }
 
-func (i *instance) replay(start, end comm.InstanceID) error {
+func (i *instance) replay(start, end uint64) error {
 	if start < i.cpm.GetMinChosenInstanceID() {
 		return fmt.Errorf("%d%d", start, i.cpm.GetMinChosenInstanceID())
 	}
@@ -168,7 +157,7 @@ func (i *instance) replay(start, end comm.InstanceID) error {
 	return nil
 }
 
-func (i *instance) GetChecksum() comm.Checksum {
+func (i *instance) GetChecksum() uint32 {
 	return i.checksum
 }
 
@@ -184,7 +173,7 @@ func (i *instance) IsReadyForNewValue() bool {
 	return i.learner.isReadyForNewValue()
 }
 
-func (i *instance) GetInstanceID() comm.InstanceID {
+func (i *instance) GetInstanceID() uint64 {
 	return i.acceptor.getInstanceID()
 }
 
@@ -257,7 +246,7 @@ func (i *instance) handleRetry() {
 func (i *instance) retryPaxosMessage() {
 	for i.retries.Len() > 0 {
 		msg := heap.Pop(i.retries).(*comm.PaxosMsg)
-		if comm.InstanceID(msg.GetInstanceID()) == i.GetInstanceID() {
+		if msg.GetInstanceID() == i.GetInstanceID() {
 			i.ReceivePaxosMessage(msg)
 		} else {
 			heap.Push(i.retries, msg)
@@ -285,12 +274,12 @@ func (i *instance) ReceivePaxosMessage(msg *comm.PaxosMsg) {
 		if err := i.verifyChecksum(msg); err != nil {
 			return
 		}
-		if comm.InstanceID(msg.GetInstanceID()) == i.acceptor.getInstanceID() ||
-			comm.InstanceID(msg.GetInstanceID()) == i.acceptor.getInstanceID()+1 {
+		if msg.GetInstanceID() == i.acceptor.getInstanceID() ||
+			msg.GetInstanceID() == i.acceptor.getInstanceID()+1 {
 			i.acceptor.onPrepare(msg)
-		} else if comm.InstanceID(msg.GetInstanceID()) > i.acceptor.getInstanceID() {
-			if comm.InstanceID(msg.GetInstanceID()) >= i.learner.getLastSeenInstanceID() {
-				if comm.InstanceID(msg.GetInstanceID()) < i.acceptor.getInstanceID()+300 {
+		} else if msg.GetInstanceID() > i.acceptor.getInstanceID() {
+			if msg.GetInstanceID() >= i.learner.getLastSeenInstanceID() {
+				if msg.GetInstanceID() < i.acceptor.getInstanceID()+300 {
 					i.ch <- msg
 				}
 			}
@@ -300,12 +289,12 @@ func (i *instance) ReceivePaxosMessage(msg *comm.PaxosMsg) {
 		if err := i.verifyChecksum(msg); err != nil {
 			return
 		}
-		if comm.InstanceID(msg.GetInstanceID()) == i.acceptor.getInstanceID() ||
-			comm.InstanceID(msg.GetInstanceID()) == i.acceptor.getInstanceID()+1 {
+		if msg.GetInstanceID() == i.acceptor.getInstanceID() ||
+			msg.GetInstanceID() == i.acceptor.getInstanceID()+1 {
 			i.acceptor.onAccept(msg)
-		} else if comm.InstanceID(msg.GetInstanceID()) > i.acceptor.getInstanceID() {
-			if comm.InstanceID(msg.GetInstanceID()) >= i.learner.getLastSeenInstanceID() {
-				if comm.InstanceID(msg.GetInstanceID()) < i.acceptor.getInstanceID()+300 {
+		} else if msg.GetInstanceID() > i.acceptor.getInstanceID() {
+			if msg.GetInstanceID() >= i.learner.getLastSeenInstanceID() {
+				if msg.GetInstanceID() < i.acceptor.getInstanceID()+300 {
 					i.ch <- msg
 				}
 			}
@@ -389,22 +378,22 @@ func (i *instance) ReceiveCheckpointMessage(msg *comm.CheckpointMsg) {
 
 func (i *instance) verifyChecksum(msg *comm.PaxosMsg) error {
 	if msg.GetChecksum() == 0 ||
-		comm.InstanceID(msg.GetInstanceID()) != i.acceptor.getInstanceID() {
+		msg.GetInstanceID() != i.acceptor.getInstanceID() {
 		return nil
 	}
 	if i.acceptor.getInstanceID() > 0 && i.checksum == 0 {
-		i.checksum = comm.Checksum(msg.GetChecksum())
+		i.checksum = msg.GetChecksum()
 		return nil
 	}
-	if comm.Checksum(msg.GetChecksum()) != i.checksum {
+	if msg.GetChecksum() != i.checksum {
 		log.Error("checksum failed")
 		return errChecksumFailed
 	}
 	return nil
 }
 
-func (i *instance) execute(instanceID comm.InstanceID, v []byte) error {
-	var smid comm.StateMachineID
+func (i *instance) execute(instanceID uint64, v []byte) error {
+	var smid uint32
 	if err := comm.BytesToObject(v[:comm.SMIDLen], &smid); err != nil {
 		return err
 	}
@@ -416,7 +405,7 @@ func (i *instance) execute(instanceID comm.InstanceID, v []byte) error {
 		ret interface{}
 		err error
 	)
-	cid, ok := i.ctx.Value("instance_id").(comm.InstanceID)
+	cid, ok := i.ctx.Value("instance_id").(uint64)
 	if ok && cid == instanceID {
 		done := make(chan struct{})
 		go func() {
@@ -440,11 +429,11 @@ func (i *instance) execute(instanceID comm.InstanceID, v []byte) error {
 	}
 }
 
-func (i *instance) GetCheckpointInstanceID() comm.InstanceID {
+func (i *instance) GetCheckpointInstanceID() uint64 {
 	//for _, sm := range i.sms {
 	//	sm
 	//}
-	return comm.InstanceID(0)
+	return 0
 }
 
 func (i *instance) PauseReplayer() {
@@ -468,13 +457,13 @@ func (i *instance) SetMaxLogCount(c int) {
 }
 
 func (i *instance) GetMajorityCount() int {
-	return i.group.GetMajorityCount()
+	return i.groupCfg.GetMajorityCount()
 }
 
-func (i *instance) GetProposerInstanceID() comm.InstanceID {
+func (i *instance) GetProposerInstanceID() uint64 {
 	return i.proposer.getInstanceID()
 }
 
-func (i *instance) ExecuteForCheckpoint(comm.InstanceID, []byte) error {
+func (i *instance) ExecuteForCheckpoint(uint64, []byte) error {
 	return nil
 }
