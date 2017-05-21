@@ -43,8 +43,8 @@ func ResolveAddr(network, addr string) (net.Addr, error) {
 	}
 }
 
-func AddrToNodeID(ip string, port int) (comm.NodeID, error) {
-	var n comm.NodeID
+func AddrToUint64(ip string, port int) (uint64, error) {
+	var n uint64
 	s := strings.Split(ip, ".")
 	b0, err := strconv.Atoi(s[0])
 	if err != nil {
@@ -63,15 +63,15 @@ func AddrToNodeID(ip string, port int) (comm.NodeID, error) {
 		return n, err
 	}
 
-	n |= comm.NodeID(b0) << 24
-	n |= comm.NodeID(b1) << 16
-	n |= comm.NodeID(b2) << 8
-	n |= comm.NodeID(b3)
+	n |= uint64(b0) << 24
+	n |= uint64(b1) << 16
+	n |= uint64(b2) << 8
+	n |= uint64(b3)
 
-	return n<<16 | comm.NodeID(port), nil
+	return n<<16 | uint64(port), nil
 }
 
-func NodeIDToAddr(i comm.NodeID) string {
+func Uint64ToAddr(i uint64) string {
 	var b [4]byte
 	p := i & 0xffff
 	b[0] = byte((i >> 16) & 0xff)
