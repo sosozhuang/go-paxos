@@ -25,6 +25,9 @@ import (
 	"github.com/sosozhuang/paxos/comm"
 	"github.com/gogo/protobuf/proto"
 	"os"
+	"math"
+	"sync"
+	"math/rand"
 )
 
 var log = logger.PaxosLogger
@@ -50,7 +53,7 @@ func (*comparator) Successor(dst, b []byte) []byte {
 }
 
 func newGroupLevelDB(cfg *StorageConfig) (ldbs ldbs, err error) {
-	ldbs = make([]levelDB, cfg.GroupCount)
+	ldbs = make([]*levelDB, cfg.GroupCount)
 	if len(ldbs) == 0 || ldbs == nil {
 		return nil, errors.New("invalid group count")
 	}
@@ -72,56 +75,83 @@ func newGroupLevelDB(cfg *StorageConfig) (ldbs ldbs, err error) {
 	return
 }
 
-func (ls *ldbs) Close() {
-	for _, db := range []*levelDB(ls) {
+func (ls ldbs) Open(ctx context.Context, stopped <-chan struct{}) error {
+	ch := make(chan error)
+	var wg sync.WaitGroup
+	wg.Add(len(ls))
+	for _, db := range ls {
+		go func() {
+			defer wg.Done()
+			if err := db.Open(ctx, stopped); err != nil {
+				ch <- err
+			}
+		}()
+	}
+	go func() {
+		wg.Wait()
+		close(ch)
+	}()
+
+	select {
+	case <-stopped:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	case err, ok := <-ch:
+		if !ok {
+			return nil
+		}
+		return err
+	}
+}
+
+func (ls ldbs) Close() {
+	for _, db := range ls {
 		if db != nil {
 			db.Close()
 		}
 	}
 }
 
-func (ls *ldbs) GetStorage(groupID comm.GroupID) (Storage, error) {
-	if groupID < 0 || groupID >= len(ls) {
-		return nil, errors.New("")
-	}
-	return ls[groupID]
+func (ls ldbs) GetStorage(id uint16) Storage {
+	return ls[id]
 }
 
-func (ls *ldbs) Get(groupID comm.GroupID, instanceID comm.InstanceID) ([]byte, error) {
-	return ls[groupID].Get(instanceID)
+func (ls ldbs) Get(id uint16, instanceID uint64) ([]byte, error) {
+	return ls[id].Get(instanceID)
 }
-func (ls *ldbs) Set(groupID comm.GroupID, instanceID comm.InstanceID, value []byte, opts *SetOptions) error {
-	return ls[groupID].Set(instanceID, value, opts)
+func (ls ldbs) Set(id uint16, instanceID uint64, value []byte) error {
+	return ls[id].Set(instanceID, value)
 }
-func (ls *ldbs) Delete(groupID comm.GroupID, instanceID comm.InstanceID, opts *DeleteOptions) error {
-	return ls[groupID].Delete(instanceID, opts)
+func (ls ldbs) Delete(id uint16, instanceID uint64) error {
+	return ls[id].Delete(instanceID)
 }
-func (ls *ldbs) GetMaxInstanceID(groupID comm.GroupID) (comm.InstanceID, error) {
-	return ls[groupID].GetMaxInstanceID()
+func (ls ldbs) GetMaxInstanceID(id uint16) (uint64, error) {
+	return ls[id].GetMaxInstanceID()
 }
-func (ls *ldbs) SetMinChosenInstanceID(groupID comm.GroupID, instanceID comm.InstanceID, opts *SetOptions) error {
-	return ls[groupID].SetMinChosenInstanceID(instanceID, opts)
+func (ls ldbs) SetMinChosenInstanceID(id uint16, instanceID uint64) error {
+	return ls[id].SetMinChosenInstanceID(instanceID)
 }
-func (ls *ldbs) GetMinChosenInstanceID(groupID comm.GroupID) (uint64, error) {
-	return ls[groupID].GetMinChosenInstanceID()
+func (ls ldbs) GetMinChosenInstanceID(id uint16) (uint64, error) {
+	return ls[id].GetMinChosenInstanceID()
 }
-func (ls *ldbs) ClearAllLog(groupID comm.GroupID) error {
-	return ls[groupID].Recreate()
+func (ls ldbs) ClearAllLog(id uint16) error {
+	return ls[id].Recreate()
 }
-func (ls *ldbs) SetSystemVariables(g comm.GroupID, v *comm.SystemVariables) error {
-	return ls[g].SetSystemVariables(v)
+func (ls ldbs) SetSystemVar(id uint16, v *comm.SystemVar) error {
+	return ls[id].SetSystemVar(v)
 }
-func (ls *ldbs) GetSystemVariables(g comm.GroupID) (*comm.SystemVariables, error) {
-	return ls[g].GetSystemVariables()
+func (ls ldbs) GetSystemVar(id uint16) (*comm.SystemVar, error) {
+	return ls[id].GetSystemVar()
 }
-func (ls *ldbs) SetMasterVariables(g comm.GroupID, v *comm.MasterVariables) error {
-	return ls[g].SetMasterVariables(v)
+func (ls ldbs) SetMasterVar(id uint16, v *comm.MasterVar) error {
+	return ls[id].SetMasterVar(v)
 }
-func (ls *ldbs) GetMasterVariables(g comm.GroupID) (*comm.MasterVariables, error) {
-	return ls[g].GetMasterVariables()
+func (ls ldbs) GetMasterVar(id uint16) (*comm.MasterVar, error) {
+	return ls[id].GetMasterVar()
 }
 
-func newLevelDB(cfg *StorageConfig, dir string, comparer comparer.Comparer) (ldb *levelDB, err error) {
+func newLevelDB(cfg *StorageConfig, dir string, cpr comparer.Comparer) (ldb *levelDB, err error) {
 	ldb = new(levelDB)
 	defer func() {
 		if err != nil && ldb != nil {
@@ -135,7 +165,7 @@ func newLevelDB(cfg *StorageConfig, dir string, comparer comparer.Comparer) (ldb
 		ErrorIfMissing: false,
 		//todo:  create option for every group?
 		//WriteBuffer: 1024 * 1024 + group * 10 * 1024,
-		Comparer: comparer,
+		Comparer: cpr,
 	}
 	ldb.DB, err = leveldb.OpenFile(dir, ldb.Options)
 	if err != nil {
@@ -178,42 +208,108 @@ func (l *levelDB) GetDir() string{
 	return l.dir
 }
 
-func (l *levelDB) Get(instanceID comm.InstanceID) ([]byte, error) {
-	return nil, nil
+func (l *levelDB) Get(instanceID uint64) ([]byte, error) {
+	key, err := comm.ObjectToBytes(instanceID)
+	if err != nil {
+		return nil, err
+	}
+	value, err := l.DB.Get(key, l.ReadOptions)
+	if err == leveldb.ErrNotFound {
+		return nil, ErrNotFound
+	}
+	if err != nil {
+		return nil, err
+	}
+	id, value, err := l.logStore.read(value)
+	if err != nil {
+		return nil, err
+	}
+	if id != instanceID {
+		return nil, errors.New("instance id not equal")
+	}
+	return value, nil
 }
 
-func (l *levelDB) Set(instanceID comm.InstanceID, value []byte, opts *SetOptions) error {
-	return nil
+func (l *levelDB) Set(instanceID uint64, value []byte) error {
+	v, err := l.logStore.append(instanceID, value)
+	if err != nil {
+		return err
+	}
+	key, err := comm.ObjectToBytes(instanceID)
+	if err != nil {
+		return err
+	}
+	return l.DB.Put(key, v, l.WriteOptions)
 }
 
-func (l *levelDB) Delete(instanceID comm.InstanceID, opts *DeleteOptions) error {
-	return nil
+func (l *levelDB) Delete(instanceID uint64) error {
+	key, err := comm.ObjectToBytes(instanceID)
+	if err != nil {
+		return err
+	}
+	value, err := l.DB.Get(key, l.ReadOptions)
+	if err == leveldb.ErrNotFound {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+
+	if rand.Uint32() % 100 < 1 {
+		if err = l.logStore.delete(value); err != nil {
+			return err
+		}
+	}
+
+	return l.DB.Delete(key, l.WriteOptions)
 }
-func (l *levelDB) GetMaxInstanceID() (instanceID comm.InstanceID, err error) {
+
+func (l *levelDB) ForceDelete(instanceID uint64) error {
+	key, err := comm.ObjectToBytes(instanceID)
+	if err != nil {
+		return err
+	}
+	value, err := l.DB.Get(key, l.ReadOptions)
+	if err == leveldb.ErrNotFound {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+
+	if err = l.logStore.delete(value); err != nil {
+		return err
+	}
+
+	return l.DB.Delete(key, l.WriteOptions)
+}
+
+func (l *levelDB) GetMaxInstanceID() (instanceID uint64, err error) {
 	it := l.NewIterator(nil, l.ReadOptions)
 	defer it.Release()
-	var key uint64
 	for it.Last(); it.Valid(); it.Prev() {
-		if err = comm.BytesToObject(it.Key(), &key); err != nil {
+		if err = comm.BytesToObject(it.Key(), &instanceID); err != nil {
 			return
 		}
-		if key != minChosenKey &&
-			key != systemVariablesKey &&
-			key != masterVariablesKey {
+		if instanceID != math.MaxUint64 &&
+			instanceID != math.MaxUint64 -1 &&
+			instanceID != math.MaxUint64 -2 {
 			return
 		}
 	}
+	err = ErrNotFound
 	return
 }
-func (l *levelDB) SetMinChosenInstanceID(instanceID comm.InstanceID, opts *SetOptions) error {
+func (l *levelDB) SetMinChosenInstanceID(instanceID uint64) error {
 	value, err := comm.ObjectToBytes(instanceID)
 	if err != nil {
 		return err
 	}
 	return l.DB.Put(minChosenKey, value, l.WriteOptions)
 }
-func (l *levelDB) GetMinChosenInstanceID() (comm.InstanceID, error) {
-	var instanceID comm.InstanceID
+
+func (l *levelDB) GetMinChosenInstanceID() (uint64, error) {
+	var instanceID uint64
 	value, err := l.DB.Get(minChosenKey, l.ReadOptions)
 	if err == leveldb.ErrNotFound {
 		return instanceID, nil
@@ -221,26 +317,18 @@ func (l *levelDB) GetMinChosenInstanceID() (comm.InstanceID, error) {
 	if err != nil {
 		return instanceID, err
 	}
-	if len(value) == 12 {
-		value, err = l.Get(minChosenKey)
-		if err == ErrNotFound {
-			return instanceID, nil
-		}
-		if err != nil {
-			return instanceID, err
-		}
-	}
 	if err = comm.BytesToObject(value, &instanceID); err != nil {
 		return instanceID, err
 	}
 	return instanceID, nil
 }
+
 func (l *levelDB) Recreate() error {
-	sv, err := l.GetSystemVariables()
+	sv, err := l.GetSystemVar()
 	if err != nil && err != ErrNotFound {
 		return err
 	}
-	mv, err := l.GetMasterVariables()
+	mv, err := l.GetMasterVar()
 	if err != nil && err != ErrNotFound {
 		return err
 	}
@@ -263,59 +351,96 @@ func (l *levelDB) Recreate() error {
 	}
 
 	if sv != nil {
-		if err = l.SetSystemVariables(sv); err != nil {
+		if err = l.SetSystemVar(sv); err != nil {
 			return err
 		}
 	}
 	if mv != nil {
-		if err = l.SetMasterVariables(mv); err != nil {
+		if err = l.SetMasterVar(mv); err != nil {
 			return err
 		}
 	}
 	return nil
 }
-func (l *levelDB) SetSystemVariables(v *comm.SystemVariables) error {
+
+func (l *levelDB) SetSystemVar(v *comm.SystemVar) error {
 	value, err := proto.Marshal(v)
 	if err != nil {
 		return err
 	}
-	return l.DB.Put(systemVariablesKey, value, l.WriteOptions)
+	return l.DB.Put(systemVarKey, value, l.WriteOptions)
 }
-func (l *levelDB) GetSystemVariables() (*comm.SystemVariables, error) {
-	value, err := l.DB.Get(systemVariablesKey, l.ReadOptions)
+
+func (l *levelDB) GetSystemVar() (*comm.SystemVar, error) {
+	value, err := l.DB.Get(systemVarKey, l.ReadOptions)
 	if err == leveldb.ErrNotFound {
 		return nil, ErrNotFound
 	}
 	if err != nil {
 		return nil, err
 	}
-	v := &comm.SystemVariables{}
+	v := &comm.SystemVar{}
 	if err := proto.Unmarshal(value, v); err != nil {
 		return nil, err
 	}
 	return v, nil
 }
-func (l *levelDB) SetMasterVariables(v *comm.MasterVariables) error {
+
+func (l *levelDB) SetMasterVar(v *comm.MasterVar) error {
 	value, err := proto.Marshal(v)
 	if err != nil {
 		return err
 	}
-	return l.DB.Put(masterVariablesKey, value, l.WriteOptions)
+	return l.DB.Put(masterVarKey, value, l.WriteOptions)
 }
-func (l *levelDB) GetMasterVariables() (*comm.MasterVariables, error) {
-	value, err := l.DB.Get(masterVariablesKey, l.ReadOptions)
+
+func (l *levelDB) GetMasterVar() (*comm.MasterVar, error) {
+	value, err := l.DB.Get(masterVarKey, l.ReadOptions)
 	if err == leveldb.ErrNotFound {
 		return nil, ErrNotFound
 	}
 	if err != nil {
 		return nil, err
 	}
-	v := &comm.MasterVariables{}
+	v := &comm.MasterVar{}
 	if err := proto.Unmarshal(value, v); err != nil {
 		return nil, err
 	}
 	return v, nil
 }
+
+func (l *levelDB) GetMaxInstanceIDFileID() (instanceID uint64, value []byte, err error) {
+	instanceID, err = l.GetMaxInstanceID()
+	if err == ErrNotFound {
+		err = nil
+		return
+	}
+	if err != nil {
+		return
+	}
+
+	var key []byte
+	key, err = comm.ObjectToBytes(instanceID)
+	if err != nil {
+		return
+	}
+	value, err = l.DB.Get(key, l.ReadOptions)
+	if err == leveldb.ErrNotFound {
+		err = ErrNotFound
+		return
+	}
+
+	return
+}
+
+func (l *levelDB) RebuildOneIndex(instanceID uint64, value []byte) error {
+	key, err := comm.ObjectToBytes(instanceID)
+	if err != nil {
+		return err
+	}
+	return l.DB.Put(key, value, l.WriteOptions)
+}
+
 func (l *levelDB) Close() {
 	if l.DB != nil {
 		l.DB.Close()
