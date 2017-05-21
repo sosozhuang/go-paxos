@@ -21,21 +21,21 @@ import (
 	"github.com/sosozhuang/paxos/election"
 	"github.com/sosozhuang/paxos/logger"
 	"github.com/sosozhuang/paxos/network"
-	"github.com/sosozhuang/paxos/paxos"
 	"github.com/sosozhuang/paxos/store"
 	"math/rand"
 	"net"
 	"strings"
 	"sync"
 	"time"
+	"math"
 )
 
 const (
-	log           = logger.PaxosLogger
-	maxGroupCount = 1000
+	maxGroupCount = math.MaxUint16
 )
 
 var (
+	log           = logger.PaxosLogger
 	proposeTimeout   = time.Minute
 	errGroupOutRange = errors.New("group out of range")
 )
@@ -57,19 +57,20 @@ type NodeConfig struct {
 	ListenPort  int
 
 	EnableMaster     bool
+	LeaseTimeout     time.Duration
 	EnableMemberShip bool
 	FollowerMode     bool
-	FollowNodeID     comm.NodeID
+	FollowNodeID     uint64
 	Name             string
 	GroupCount       int
 	Peers            string
 
 	//runtime
-	id         comm.NodeID
+	id         uint64
 	clusterID  uint64
 	listenAddr string
-	peersMap   map[comm.NodeID]net.Addr
-	members    map[comm.NodeID]string
+	peersMap   map[uint64]net.Addr
+	members    map[uint64]string
 }
 
 func (cfg *NodeConfig) validate() error {
@@ -86,27 +87,27 @@ func (cfg *NodeConfig) validate() error {
 	} else {
 		ip = cfg.ListenIP
 	}
-	id, err := network.AddrToInt64(ip, cfg.ListenPort)
+	id, err := network.AddrToUint64(ip, cfg.ListenPort)
 	if err != nil {
 		return err
 	}
 	cfg.id = id
-	cfg.clusterID = (id ^ rand.Uint32()) + rand.Uint32()
+	cfg.clusterID = (uint64(id) ^ uint64(rand.Uint32())) + uint64(rand.Uint32())
 
 	//currently only tcp network supported
 	cfg.network = "tcp"
 	cfg.listenAddr = fmt.Sprintf("%s:%d", cfg.ListenIP, cfg.ListenPort)
 
 	peers := strings.Split(cfg.Peers, ",")
-	cfg.peersMap = make(map[comm.NodeID]net.Addr, len(peers))
-	cfg.members = make(map[comm.NodeID]string, len(peers) + 1)
+	cfg.peersMap = make(map[uint64]net.Addr, len(peers))
+	cfg.members = make(map[uint64]string, len(peers) + 1)
 	cfg.members[cfg.id] = cfg.listenAddr
 	for _, peer := range peers {
 		addr, err := network.ResolveAddr(cfg.network, peer)
 		if err != nil {
 			return err
 		}
-		id, err = network.AddrToInt64(cfg.ListenIP, cfg.ListenPort)
+		id, err = network.AddrToUint64(cfg.ListenIP, cfg.ListenPort)
 		if err != nil {
 			return err
 		}
@@ -131,11 +132,10 @@ type node struct {
 	wg      sync.WaitGroup
 	storage store.MultiGroupStorage
 	network comm.NetWork
-	tp      paxos.Transporter
 	masters []election.Master
-	groups  []Group
-	batches []Batch
-	sms     [][]StateMachine
+	groups  []comm.Group
+	//batches []Batch
+	sms     [][]comm.StateMachine
 }
 
 func NewNode(cfg NodeConfig) (n *node, err error) {
@@ -143,7 +143,7 @@ func NewNode(cfg NodeConfig) (n *node, err error) {
 		return nil, err
 	}
 	n = &node{
-		cfg:     cfg,
+		cfg:     &cfg,
 		ready:   make(chan struct{}),
 		done:    make(chan struct{}),
 		stopped: make(chan struct{}),
@@ -197,25 +197,28 @@ func NewNode(cfg NodeConfig) (n *node, err error) {
 
 	if n.cfg.EnableMaster {
 		n.masters = make([]election.Master, n.cfg.GroupCount)
-		masterCfg := election.MasterConfig{}
-		for i := 0; i < n.cfg.GroupCount; i++ {
-			if n.masters[i], err = election.NewMaster(masterCfg, n, i, n.storage); err != nil {
+		masterCfg := election.MasterConfig{
+			LeaseTimeout: n.cfg.LeaseTimeout,
+		}
+		for i := uint16(0); i < uint16(n.cfg.GroupCount); i++ {
+			if n.masters[i], err = election.NewMaster(masterCfg, n.cfg.id, i, n, n.storage.GetStorage(i)); err != nil {
 				log.Error(err)
 				return
 			}
 		}
 	}
 
-	n.tp, err = paxos.NewTransporter()
-	if err != nil {
-		log.Error(err)
-		return
-	}
-
-	n.groups = make([]Group, n.cfg.GroupCount)
-	groupCfg := GroupConfig{}
-	for i := 0; i < n.cfg.GroupCount; i++ {
-		if n.groups[i], err = newGroup(groupCfg, n, i, n.masters[i].GetStateMachine()); err != nil {
+	n.groups = make([]comm.Group, n.cfg.GroupCount)
+	for i := uint16(0); i < uint16(n.cfg.GroupCount); i++ {
+		groupCfg := groupConfig{
+			nodeID: n.cfg.id,
+			groupID: i,
+			st: n.storage.GetStorage(i),
+			followerMode: false,
+			followNodeID: comm.UnknownNodeID,
+			enableMemberShip: n.cfg.EnableMemberShip,
+		}
+		if n.groups[i], err = newGroup(groupCfg, n.masters[i].GetStateMachine(), n.network); err != nil {
 			log.Error(err)
 			return
 		}
@@ -229,6 +232,7 @@ func (n *node) Start() (err error) {
 	defer func() {
 		cancel()
 		if err != nil {
+			close(n.stopped)
 			n.stop()
 		}
 	}()
@@ -276,9 +280,10 @@ func (n *node) Serve() error {
 	defer n.stop()
 	log.Debug("node ready")
 	select {
-	case <-n.stop:
+	case <-n.stopped:
 		return nil
 	case err := <-n.errChan:
+		close(n.stopped)
 		return err
 	}
 }
@@ -291,17 +296,17 @@ func (n *node) stop() {
 		n.network.Stop()
 	}
 	for _, master := range n.masters {
-		master
+		master.Stop()
 	}
 	for _, group := range n.groups {
-		group
+		group.Stop()
 	}
-	for _, batch := range n.batches {
-		batch
-	}
-	for _, sm := range n.sms {
-		sm
-	}
+	//for _, batch := range n.batches {
+	//	batch
+	//}
+	//for _, sm := range n.sms {
+	//	sm
+	//}
 	close(n.done)
 }
 
@@ -319,18 +324,18 @@ func (n *node) NotifyError(err error) {
 
 func (n *node) initStateMachine() error {
 	for i, group := range n.groups {
-		group.AddStateMachines(n.sms[i]...)
+		group.AddStateMachine(n.sms[i]...)
 	}
 	if n.cfg.EnableMaster && !n.cfg.FollowerMode {
 		for _, master := range n.masters {
-			master.Start()
+			master.Start(context.Background(), n.stopped)
 		}
 	}
 	return nil
 }
 
-func (n *node) checkGroupID(groupID comm.GroupID) bool {
-	return groupID < 0 || groupID >= n.cfg.GroupCount
+func (n *node) checkGroupID(groupID uint16) bool {
+	return groupID < 0 || groupID >= uint16(n.cfg.GroupCount)
 }
 
 func (n *node) ReceiveMessage(b []byte) {
@@ -346,19 +351,19 @@ func (n *node) ReceiveMessage(b []byte) {
 	n.groups[groupID].ReceiveMessage(b[comm.GroupIDLen:])
 }
 
-func (n *node) Propose(groupID comm.GroupID, smid comm.StateMachineID, value []byte) error {
+func (n *node) Propose(groupID uint16, smid uint32, value []byte) error {
 	return n.ProposeWithTimeout(groupID, smid, value, proposeTimeout)
 }
 
-func (n *node) ProposeWithTimeout(groupID comm.GroupID, smid comm.StateMachineID, value []byte, d time.Duration) error {
+func (n *node) ProposeWithTimeout(groupID uint16, smid uint32, value []byte, d time.Duration) error {
 	return n.ProposeWithCtxTimeout(context.Background(), groupID, smid, value, d)
 }
 
-func (n *node) ProposeWithCtx(ctx context.Context, groupID comm.GroupID, smid comm.StateMachineID, value []byte) error {
+func (n *node) ProposeWithCtx(ctx context.Context, groupID uint16, smid uint32, value []byte) error {
 	return n.ProposeWithCtxTimeout(ctx, groupID, smid, value, proposeTimeout)
 }
 
-func (n *node) ProposeWithCtxTimeout(ctx context.Context, groupID comm.GroupID, smid comm.StateMachineID, value []byte, d time.Duration) error {
+func (n *node) ProposeWithCtxTimeout(ctx context.Context, groupID uint16, smid uint32, value []byte, d time.Duration) error {
 	if !n.checkGroupID(groupID) {
 		return errGroupOutRange
 	}
@@ -381,10 +386,10 @@ func (n *node) ProposeWithCtxTimeout(ctx context.Context, groupID comm.GroupID, 
 	}
 }
 
-func (n *node) BatchPropose(groupID comm.GroupID, smid comm.StateMachineID, value []byte, batch uint32) error {
+func (n *node) BatchPropose(groupID uint16, smid uint32, value []byte, batch uint32) error {
 	return n.BatchProposeWithTimeout(groupID, smid, value, batch, proposeTimeout)
 }
-func (n *node) BatchProposeWithTimeout(groupID comm.GroupID, smid comm.StateMachineID, value []byte, batch uint32, d time.Duration) error {
+func (n *node) BatchProposeWithTimeout(groupID uint16, smid uint32, value []byte, batch uint32, d time.Duration) error {
 	if !n.checkGroupID(groupID) {
 		return errGroupOutRange
 	}
@@ -408,14 +413,14 @@ func (n *node) BatchProposeWithTimeout(groupID comm.GroupID, smid comm.StateMach
 	}
 }
 
-func (n *node) GetCurrentInstanceID(groupID comm.GroupID) (comm.InstanceID, error) {
+func (n *node) GetCurrentInstanceID(groupID uint16) (uint64, error) {
 	if !n.checkGroupID(groupID) {
 		return 0, errGroupOutRange
 	}
-	return n.groups[groupID].GetCurrentInstanceID()
+	return n.groups[groupID].GetCurrentInstanceID(), nil
 }
 
-func (n *node) GetNodeID() comm.NodeID {
+func (n *node) GetNodeID() uint64 {
 	return n.cfg.id
 }
 
@@ -435,7 +440,7 @@ func (n *node) IsFollower() bool {
 	return n.cfg.FollowerMode
 }
 
-func (n *node) GetFollowNodeID() comm.NodeID {
+func (n *node) GetFollowNodeID() uint64 {
 	return n.cfg.FollowNodeID
 }
 
@@ -473,12 +478,12 @@ func (n *node) ContinueCleaner() {
 	}
 }
 
-func (n *node) AddMember(groupID comm.GroupID, ip string, port int) error {
+func (n *node) AddMember(groupID uint16, ip string, port int) error {
 	if !n.checkGroupID(groupID) {
 		return errGroupOutRange
 	}
 
-	nodeID, err := network.AddrToInt64(ip, port)
+	nodeID, err := network.AddrToUint64(ip, port)
 	if err != nil {
 		return err
 	}
@@ -497,11 +502,11 @@ func (n *node) AddMember(groupID comm.GroupID, ip string, port int) error {
 	}
 }
 
-func (n *node) RemoveMember(groupID comm.GroupID, ip string, port int) error {
+func (n *node) RemoveMember(groupID uint16, ip string, port int) error {
 	if !n.checkGroupID(groupID) {
 		return errGroupOutRange
 	}
-	nodeID, err := network.AddrToInt64(ip, port)
+	nodeID, err := network.AddrToUint64(ip, port)
 	if err != nil {
 		return err
 	}
@@ -520,15 +525,15 @@ func (n *node) RemoveMember(groupID comm.GroupID, ip string, port int) error {
 	}
 }
 
-func (n *node) ChangeMember(groupID comm.GroupID, dstip string, dstport int, srcip string, srcport int) error {
+func (n *node) ChangeMember(groupID uint16, dstip string, dstport int, srcip string, srcport int) error {
 	if !n.checkGroupID(groupID) {
 		return errGroupOutRange
 	}
-	dst, err := network.AddrToInt64(dstip, dstport)
+	dst, err := network.AddrToUint64(dstip, dstport)
 	if err != nil {
 		return err
 	}
-	src, err := network.AddrToInt64(srcip, srcport)
+	src, err := network.AddrToUint64(srcip, srcport)
 	if err != nil {
 		return err
 	}
@@ -547,35 +552,35 @@ func (n *node) ChangeMember(groupID comm.GroupID, dstip string, dstport int, src
 	}
 }
 
-//func (n *node) ShowMemberShip(groupID comm.GroupID) error {
+//func (n *node) ShowMemberShip(groupID uint16) error {
 //	if !n.checkGroupID(groupID) {
 //		return errGroupOutRange
 //	}
 //	return nil
 //}
 //
-//func (n *node) GetMasterNode(groupID comm.GroupID) (Node, error) {
+//func (n *node) GetMasterNode(groupID uint16) (Node, error) {
 //	if !n.checkGroupID(groupID) {
 //		return nil, fmt.Errorf("group %d out of range", groupID)
 //	}
 //	return n.masters[groupID], nil
 //}
 //
-//func (n *node) MasterNodeWithVersion(groupID comm.GroupID, version uint64) Node {
+//func (n *node) MasterNodeWithVersion(groupID uint16, version uint64) Node {
 //	if !n.checkGroupID(groupID) {
 //		return errGroupOutRange
 //	}
 //	return nil
 //}
 //
-//func (n *node) IsMasterNode(groupID comm.GroupID) bool {
+//func (n *node) IsMasterNode(groupID uint16) bool {
 //	if !n.checkGroupID(groupID) {
 //		return errGroupOutRange
 //	}
 //	return false
 //}
 
-func (n *node) SetMasterLeaseTime(groupID comm.GroupID, d time.Duration) error {
+func (n *node) SetMasterLeaseTime(groupID uint16, d time.Duration) error {
 	if !n.checkGroupID(groupID) {
 		return errGroupOutRange
 	}
@@ -583,7 +588,7 @@ func (n *node) SetMasterLeaseTime(groupID comm.GroupID, d time.Duration) error {
 	return nil
 }
 
-func (n *node) GiveUpMasterElection(groupID comm.GroupID) error {
+func (n *node) GiveUpMasterElection(groupID uint16) error {
 	if !n.checkGroupID(groupID) {
 		return errGroupOutRange
 	}
@@ -591,25 +596,25 @@ func (n *node) GiveUpMasterElection(groupID comm.GroupID) error {
 	return nil
 }
 
-func (n *node) SetMaxHoldThreads(groupID comm.GroupID, count uint) error {
+func (n *node) SetMaxHoldThreads(groupID uint16, count uint) error {
 	return nil
 }
 
-func (n *node) SetProposeWaitTimeThreshold(groupID comm.GroupID, duration time.Duration) error {
+func (n *node) SetProposeWaitTimeThreshold(groupID uint16, duration time.Duration) error {
 	return nil
 }
 
-func (n *node) SetSync(groupID comm.GroupID, sync bool) error {
+func (n *node) SetSync(groupID uint16, sync bool) error {
 	if !n.checkGroupID(groupID) {
 		return errGroupOutRange
 	}
 	return nil
 }
 
-func (n *node) SetBatchCount(groupID comm.GroupID, count int) error {
+func (n *node) SetBatchCount(groupID uint16, count int) error {
 	return nil
 }
 
-func (n *node) SetBatchDelayTime(groupID comm.GroupID, duration time.Duration) error {
+func (n *node) SetBatchDelayTime(groupID uint16, duration time.Duration) error {
 	return nil
 }

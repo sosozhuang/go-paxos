@@ -19,6 +19,7 @@ import (
 	"encoding/binary"
 	"unsafe"
 	"time"
+	"math"
 )
 
 type Receiver interface {
@@ -38,30 +39,34 @@ type NetWork interface {
 type Node interface {
 	NotifyStop() <-chan struct{}
 	NotifyError(err error)
-	Propose(GroupID, StateMachineID, []byte) error
-	ProposeWithTimeout(GroupID, StateMachineID, []byte, time.Duration) error
-	ProposeWithCtx(context.Context, GroupID, StateMachineID, []byte) error
-	ProposeWithCtxTimeout(context.Context, GroupID, StateMachineID, []byte, time.Duration) error
-	GetNodeID() NodeID
-
+	Propose(uint16, uint32, []byte) error
+	ProposeWithTimeout(uint16, uint32, []byte, time.Duration) error
+	ProposeWithCtx(context.Context, uint16, uint32, []byte) error
+	ProposeWithCtxTimeout(context.Context, uint16, uint32, []byte, time.Duration) error
+	GetNodeID() uint64
 	ReceiveMessage([]byte)
 }
 
+type Proposer interface {
+	Propose(uint16, uint32, []byte) error
+	ProposeWithTimeout(uint16, uint32, []byte, time.Duration) error
+	ProposeWithCtx(context.Context, uint16, uint32, []byte) error
+	ProposeWithCtxTimeout(context.Context, uint16, uint32, []byte, time.Duration) error
+}
+
 type StateMachine interface {
-	Execute(context.Context, InstanceID, []byte) (interface{}, error)
-	GetStateMachineID() StateMachineID
-	ExecuteForCheckpoint(InstanceID, []byte) error
-	GetCheckpointInstanceID() InstanceID
+	GetStateMachineID() uint32
+	Execute(context.Context, uint64, []byte) (interface{}, error)
+	ExecuteForCheckpoint(uint64, []byte) error
+	GetCheckpointInstanceID() uint64
 	//LockCheckpointState() error
 	//UnLockCheckpointState()
 	//CheckpointState() error
 	//LoadCheckpointState() error
 }
 
-type NodeID uint64
-type GroupID uint16
-type InstanceID uint64
-type StateMachineID uint64
+//type NodeID uint64
+//type InstanceID uint64
 type Result struct {
 	Ret interface{}
 	Err error
@@ -69,8 +74,9 @@ type Result struct {
 
 const (
 	UnknownNodeID = 0
-	GroupIDLen = int(unsafe.Sizeof(GroupID(0)))
-	SMIDLen = int(unsafe.Sizeof(StateMachineID(0)))
+	UnknownVersion = uint64(math.MaxUint64)
+	GroupIDLen = int(unsafe.Sizeof(uint16(0)))
+	SMIDLen = int(unsafe.Sizeof(uint32(0)))
 	Int32Len = int(unsafe.Sizeof(int32(0)))
 )
 
@@ -105,42 +111,42 @@ func BytesToInt(b []byte) (int, error) {
 	return int(n), nil
 }
 
+type GroupConfig interface {
+	FollowerMode() bool
+	GetFollowNodeID() uint64
+	GetGroupID() uint16
+	GetClusterID() uint64
+	GetMajorityCount() int
+	GetLearnNodes() map[uint64]string
+	GetMembers() map[uint64]string
+	GetFollowers() map[uint64]string
+	AddFollower(uint64)
+}
+
 type Group interface {
 	Start(context.Context, <-chan struct{}) error
 	Stop()
-	Propose(context.Context, StateMachineID, []byte) (<-chan Result, error)
-	BatchPropose(context.Context, StateMachineID, []byte, uint32) (<-chan Result, error)
-	FollowerMode() bool
-	FollowNodeID() NodeID
-	EnableMemberShip() bool
-	AddStateMachines(...StateMachine)
+	Propose(context.Context, uint32, []byte) (<-chan Result, error)
+	BatchPropose(context.Context, uint32, []byte, uint32) (<-chan Result, error)
+	AddStateMachine(...StateMachine)
 	ReceiveMessage([]byte)
-	GetCurrentInstanceID() InstanceID
+	GetCurrentInstanceID() uint64
 	PauseReplayer()
 	ContinueReplayer()
 	PauseCleaner()
 	ContinueCleaner()
 	SetMaxLogCount(int)
-	GetGroupID() GroupID
-	GetClusterID() uint64
-	GetMajorityCount() int
-	GetLearnNodes() map[NodeID]string
-	GetMembers() map[NodeID]string
-	AddMember(context.Context, NodeID, string) (<-chan Result, error)
-	RemoveMember(context.Context, NodeID) (<-chan Result, error)
-	ChangeMember(context.Context, NodeID, string, NodeID) (<-chan Result, error)
-	GetFollowers() map[NodeID]string
-	AddFollower(NodeID)
+	AddMember(context.Context, uint64, string) (<-chan Result, error)
+	RemoveMember(context.Context, uint64) (<-chan Result, error)
+	ChangeMember(context.Context, uint64, string, uint64) (<-chan Result, error)
 }
-
-type Checksum uint32
 
 type Instance interface {
 	Start(context.Context, <-chan struct{}) error
 	Stop()
 	IsReadyForNewValue() bool
-	GetInstanceID() InstanceID
-	GetChecksum() Checksum
+	GetInstanceID() uint64
+	GetChecksum() uint32
 	NewValue(context.Context)
 	AddStateMachine(...StateMachine)
 	ReceivePaxosMessage(*PaxosMsg)
@@ -151,12 +157,12 @@ type Instance interface {
 	ContinueCleaner()
 	SetMaxLogCount(int)
 	GetMajorityCount() int
-	GetProposerInstanceID() InstanceID
-	GetCheckpointInstanceID() InstanceID
-	ExecuteForCheckpoint(InstanceID, []byte) error
+	GetProposerInstanceID() uint64
+	GetCheckpointInstanceID() uint64
+	ExecuteForCheckpoint(uint64, []byte) error
 }
 
 type Learner interface {
-	SendCheckpointBegin(NodeID, uint64, uint64, InstanceID)
-	SendCheckpointEnd(NodeID, uint64, uint64, InstanceID)
+	SendCheckpointBegin(uint64, uint64, uint64, uint64)
+	SendCheckpointEnd(uint64, uint64, uint64, uint64)
 }
