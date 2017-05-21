@@ -11,7 +11,7 @@
 // WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 // See the License for the specific language governing permissions and
 // limitations under the License.
-package paxos
+package paxos1
 
 import (
 	"context"
@@ -19,7 +19,6 @@ import (
 	"github.com/sosozhuang/paxos/comm"
 	"github.com/sosozhuang/paxos/logger"
 	"sync"
-	"sync/atomic"
 	"time"
 )
 
@@ -35,8 +34,11 @@ type Proposer interface {
 	cancelSkipPrepare()
 }
 
+var (
+	plog = logger.ProposerLogger
+)
+
 const (
-	plog                = logger.ProposerLogger
 	startPrepareTimeout = time.Second * 2
 	startAcceptTimeout  = time.Second
 	maxPrepareTimeout   = time.Second * 8
@@ -54,10 +56,10 @@ func newProposer(nodeID comm.NodeID, groupID comm.GroupID, tp Transporter, learn
 		learner:              learner,
 		prepareTimeout:       pt,
 		acceptTimeout:        at,
-		rejectNodes:          make(map[comm.NodeID]struct{}),
-		promiseOrAcceptNodes: make(map[comm.NodeID]struct{}),
-		prepareReplies:       make(map[proposalID]Reply),
-		acceptReplies:        make(map[proposalID]Reply),
+		rejectNodes:          make(map[uint64]struct{}),
+		promiseOrAcceptNodes: make(map[uint64]struct{}),
+		prepareReplies:       make(map[uint64]Reply),
+		acceptReplies:        make(map[uint64]Reply),
 		tp:                   tp,
 	}
 }
@@ -65,7 +67,7 @@ func newProposer(nodeID comm.NodeID, groupID comm.GroupID, tp Transporter, learn
 type proposer struct {
 	state                proposerState
 	nodeID               comm.NodeID
-	instance             Instance
+	instance             comm.Instance
 	instanceID           comm.InstanceID
 	learner              Learner
 	preparing            bool
@@ -74,18 +76,18 @@ type proposer struct {
 	rejected             bool
 	prepareTimeout       time.Duration
 	acceptTimeout        time.Duration
-	rejectNodes          map[comm.NodeID]struct{}
-	promiseOrAcceptNodes map[comm.NodeID]struct{}
+	rejectNodes          map[uint64]struct{}
+	promiseOrAcceptNodes map[uint64]struct{}
 	mu                   sync.Mutex
 	prepareMu            sync.RWMutex
-	prepareReplies       map[proposalID]Reply
+	prepareReplies       map[uint64]Reply
 	acceptMu             sync.RWMutex
-	acceptReplies        map[proposalID]Reply
+	acceptReplies        map[uint64]Reply
 	tp                   Transporter
 }
 
 func (p *proposer) newInstance() {
-	atomic.AddUint64(&p.instanceID, 1)
+	//atomic.AddUint64(&p.instanceID, 1)
 	p.startNewRound()
 	p.state.reset()
 	p.preparing = false
@@ -127,7 +129,7 @@ func (p *proposer) newValue(ctx context.Context) {
 	}
 }
 
-func (p *proposer) prepare(ctx context.Context, done <-chan struct{}, rejected bool) {
+func (p *proposer) prepare(ctx context.Context, done chan struct{}, rejected bool) {
 	p.preparing = true
 	p.accepting = false
 	p.skipPrepare = false
@@ -141,9 +143,9 @@ func (p *proposer) prepare(ctx context.Context, done <-chan struct{}, rejected b
 	p.startNewRound()
 	msg := &comm.PaxosMsg{
 		Type:       comm.PaxosMsgType_Prepare.Enum(),
-		InstanceID: proto.Uint64(p.instanceID),
-		NodeID:     proto.Uint64(p.nodeID),
-		ProposalID: proto.Uint64(p.state.proposalID),
+		InstanceID: proto.Uint64(uint64(p.instanceID)),
+		NodeID:     proto.Uint64(uint64(p.nodeID)),
+		ProposalID: proto.Uint64(uint64(p.state.proposalID)),
 	}
 
 	select {
@@ -154,30 +156,30 @@ func (p *proposer) prepare(ctx context.Context, done <-chan struct{}, rejected b
 }
 
 func (p *proposer) getMajorityCount() int {
-	return p.instance.getMajorityCount()
+	return p.instance.GetMajorityCount()
 }
 
-func (p *proposer) broadcastPrepareMessage(ctx context.Context, done <-chan struct{}, msg *comm.PaxosMsg) {
+func (p *proposer) broadcastPrepareMessage(ctx context.Context, done chan struct{}, msg *comm.PaxosMsg) {
 	size := p.getMajorityCount()
 	ac, rc := make(chan struct{}, size), make(chan struct{}, size)
 	p.prepareMu.Lock()
-	p.prepareReplies[msg.ProposalID] = func(msg *comm.PaxosMsg) {
+	p.prepareReplies[msg.GetProposalID()] = func(msg *comm.PaxosMsg) {
 		if !p.preparing {
 			return
 		}
-		if msg.ProposalID != p.state.proposalID {
+		if proposalID(msg.GetProposalID()) != p.state.proposalID {
 			return
 		}
 		p.mu.Lock()
 		defer p.mu.Unlock()
 		if msg.GetRejectByPromiseID() == 0 {
-			p.addPromiseOrAcceptNode(msg.NodeID)
-			b := ballot{msg.GetPreAcceptID(), msg.GetPreAcceptNodeID()}
+			p.addPromiseOrAcceptNode(msg.GetNodeID())
+			b := ballot{proposalID(msg.GetPreAcceptID()), comm.NodeID(msg.GetPreAcceptNodeID())}
 			p.state.setPreAcceptValue(b, msg.GetValue())
 		} else {
-			p.addRejectNode(msg.NodeID)
+			p.addRejectNode(msg.GetNodeID())
 			p.rejected = true
-			p.state.SetLastProposalID(msg.GetRejectByPromiseID())
+			p.state.SetLastProposalID(proposalID(msg.GetRejectByPromiseID()))
 		}
 		if p.isPassed() {
 			ac <- struct{}{}
@@ -198,7 +200,7 @@ func (p *proposer) broadcastPrepareMessage(ctx context.Context, done <-chan stru
 		close(ac)
 		close(rc)
 		p.prepareMu.Lock()
-		delete(p.prepareReplies, msg.ProposalID)
+		delete(p.prepareReplies, msg.GetProposalID())
 		p.prepareMu.Unlock()
 	}()
 
@@ -231,7 +233,7 @@ func (p *proposer) broadcastPrepareMessage(ctx context.Context, done <-chan stru
 }
 
 func (p *proposer) onPrepareReply(msg *comm.PaxosMsg) {
-	if msg.GetInstanceID() != p.instanceID {
+	if comm.InstanceID(msg.GetInstanceID()) != p.instanceID {
 		log.Warningf("%d%d\n", msg.GetInstanceID(), p.instanceID)
 		return
 	}
@@ -245,16 +247,16 @@ func (p *proposer) onPrepareReply(msg *comm.PaxosMsg) {
 func (p *proposer) startNewRound() {
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	p.rejectNodes = make(map[comm.NodeID]struct{})
-	p.promiseOrAcceptNodes = make(map[comm.NodeID]struct{})
+	p.rejectNodes = make(map[uint64]struct{})
+	p.promiseOrAcceptNodes = make(map[uint64]struct{})
 }
 
-func (p *proposer) addRejectNode(nodeID comm.NodeID) {
-	p.rejectNodes[nodeID] = struct{}{}
+func (p *proposer) addRejectNode(id uint64) {
+	p.rejectNodes[id] = struct{}{}
 }
 
-func (p *proposer) addPromiseOrAcceptNode(nodeID comm.NodeID) {
-	p.promiseOrAcceptNodes[nodeID] = struct{}{}
+func (p *proposer) addPromiseOrAcceptNode(id uint64) {
+	p.promiseOrAcceptNodes[id] = struct{}{}
 }
 
 func (p *proposer) isPassed() bool {
@@ -265,18 +267,18 @@ func (p *proposer) isRejected() bool {
 	return len(p.rejectNodes) >= p.getMajorityCount()
 }
 
-func (p *proposer) accept(ctx context.Context, done <-chan struct{}) {
+func (p *proposer) accept(ctx context.Context, done chan struct{}) {
 	p.preparing = false
 	p.accepting = true
 
 	p.startNewRound()
 	msg := &comm.PaxosMsg{
 		Type:       comm.PaxosMsgType_Accept.Enum(),
-		InstanceID: proto.Uint64(p.instanceID),
-		NodeID:     proto.Uint64(p.nodeID),
-		ProposalID: proto.Uint64(p.state.proposalID),
+		InstanceID: proto.Uint64(uint64(p.instanceID)),
+		NodeID:     proto.Uint64(uint64(p.nodeID)),
+		ProposalID: proto.Uint64(uint64(p.state.proposalID)),
 		Value:      p.state.value,
-		Checksum:   proto.Uint32(p.instance.getChecksum()),
+		Checksum:   proto.Uint32(uint32(p.instance.GetChecksum())),
 	}
 
 	select {
@@ -286,25 +288,25 @@ func (p *proposer) accept(ctx context.Context, done <-chan struct{}) {
 	}
 }
 
-func (p *proposer) broadcastAcceptMessage(ctx context.Context, done <-chan struct{}, msg *comm.PaxosMsg) {
+func (p *proposer) broadcastAcceptMessage(ctx context.Context, done chan struct{}, msg *comm.PaxosMsg) {
 	size := p.getMajorityCount()
 	ac, rc := make(chan struct{}, size), make(chan struct{}, size)
 	p.acceptMu.Lock()
-	p.acceptReplies[msg.ProposalID] = func(msg *comm.PaxosMsg) {
+	p.acceptReplies[msg.GetProposalID()] = func(msg *comm.PaxosMsg) {
 		if !p.accepting {
 			return
 		}
-		if msg.ProposalID != p.state.proposalID {
+		if proposalID(msg.GetProposalID()) != p.state.proposalID {
 			return
 		}
 		p.mu.Lock()
 		defer p.mu.Unlock()
 		if msg.GetRejectByPromiseID() == 0 {
-			p.addPromiseOrAcceptNode(msg.NodeID)
+			p.addPromiseOrAcceptNode(msg.GetNodeID())
 		} else {
-			p.addRejectNode(msg.NodeID)
+			p.addRejectNode(msg.GetNodeID())
 			p.rejected = true
-			p.state.SetLastProposalID(msg.GetRejectByPromiseID())
+			p.state.SetLastProposalID(proposalID(msg.GetRejectByPromiseID()))
 		}
 		if p.isPassed() {
 			ac <- struct{}{}
@@ -326,7 +328,7 @@ func (p *proposer) broadcastAcceptMessage(ctx context.Context, done <-chan struc
 		close(ac)
 		close(rc)
 		p.acceptMu.Lock()
-		delete(p.acceptReplies, msg.ProposalID)
+		delete(p.acceptReplies, msg.GetProposalID())
 		p.acceptMu.Unlock()
 	}()
 
@@ -354,7 +356,7 @@ func (p *proposer) broadcastAcceptMessage(ctx context.Context, done <-chan struc
 	case <-ac:
 		//accept
 		p.accepting = false
-		p.learner.proposalFinished(p.instanceID, msg.GetProposalID())
+		p.learner.proposalFinished(p.instanceID, proposalID(msg.GetProposalID()))
 		close(done)
 	case <-rc:
 		//reject
@@ -366,7 +368,7 @@ func (p *proposer) broadcastAcceptMessage(ctx context.Context, done <-chan struc
 }
 
 func (p *proposer) onAcceptReply(msg *comm.PaxosMsg) {
-	if msg.GetInstanceID() != p.instanceID {
+	if comm.InstanceID(msg.GetInstanceID()) != p.instanceID {
 		log.Warningf("%d%d\n", msg.GetInstanceID(), p.instanceID)
 		return
 	}
@@ -423,7 +425,7 @@ func (s *proposerState) newState() {
 	if s.proposalID < s.lastProposalID {
 		s.proposalID = s.lastProposalID
 	}
-	atomic.AddUint64(&s.proposalID, 1)
+	//atomic.AddUint64(&s.proposalID, 1)
 }
 
 func (s *proposerState) resetBallot() {
@@ -440,42 +442,42 @@ func (b *ballot) reset() {
 	b.nodeID = comm.NodeID(0)
 }
 
-func (b *ballot) ge(o ballot) {
+func (b ballot) ge(o ballot) bool {
 	if b.proposalID == o.proposalID {
 		return b.nodeID >= o.nodeID
 	}
 	return b.proposalID >= o.proposalID
 }
 
-func (b *ballot) gt(o ballot) {
+func (b ballot) gt(o ballot) bool {
 	if b.proposalID == o.proposalID {
 		return b.nodeID > o.nodeID
 	}
 	return b.proposalID > o.proposalID
 }
 
-func (b *ballot) eq(o ballot) {
+func (b ballot) eq(o ballot) bool {
 	return b.proposalID == o.proposalID && b.nodeID == o.nodeID
 }
 
-func (b *ballot) ne(o ballot) {
+func (b ballot) ne(o ballot) bool {
 	return b.proposalID != o.proposalID || b.nodeID != b.nodeID
 }
 
-func (b *ballot) le(o ballot) {
+func (b ballot) le(o ballot) bool {
 	if b.proposalID == o.proposalID {
 		return b.nodeID <= o.nodeID
 	}
 	return b.proposalID <= o.proposalID
 }
 
-func (b *ballot) lt(o ballot) {
+func (b ballot) lt(o ballot) bool {
 	if b.proposalID == o.proposalID {
 		return b.nodeID < o.nodeID
 	}
 	return b.proposalID < o.proposalID
 }
 
-func (b *ballot) valid() bool {
+func (b ballot) valid() bool {
 	return b.proposalID != 0
 }

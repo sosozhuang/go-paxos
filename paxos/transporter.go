@@ -11,12 +11,11 @@
 // WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 // See the License for the specific language governing permissions and
 // limitations under the License.
-package paxos
+package paxos1
 
 import (
 	"github.com/gogo/protobuf/proto"
 	"github.com/sosozhuang/paxos/comm"
-	"github.com/sosozhuang/paxos/node"
 	"hash/crc32"
 )
 
@@ -27,14 +26,18 @@ type Transporter interface {
 	broadcastToLearnNodes(comm.MsgType, proto.Message)
 }
 
-func NewTransporter() (Transporter, error) {
-	return nil, nil
-}
-
 type transporter struct {
 	nodeID comm.NodeID
-	group  node.Group
+	group  comm.Group
 	sender comm.Sender
+}
+
+func NewTransporter(nodeID comm.NodeID, group comm.Group, sender comm.Sender) (Transporter, error) {
+	return &transporter{
+		nodeID: nodeID,
+		group: group,
+		sender: sender,
+	}, nil
 }
 
 func (t *transporter) send(nodeID comm.NodeID, msgType comm.MsgType, msg proto.Message) {
@@ -98,7 +101,8 @@ func (t *transporter) broadcast(msgType comm.MsgType, msg proto.Message) {
 		return
 	}
 
-	for id, addr := range t.group.GetMembers() {
+	members := t.group.GetMembers()
+	for id, addr := range members {
 		if id != t.nodeID {
 			if err = t.sender.SendMessage(addr, b); err != nil {
 				log.Error(err)
@@ -114,7 +118,23 @@ func (t *transporter) broadcastToFollowers(msgType comm.MsgType, msg proto.Messa
 		return
 	}
 
-	for _, addr := range t.group.GetFollowers() {
+	followers := t.group.GetFollowers()
+	for _, addr := range followers {
+		if err = t.sender.SendMessage(addr, b); err != nil {
+			log.Error(err)
+		}
+	}
+}
+
+func (t *transporter) broadcastToLearnNodes(msgType comm.MsgType, msg proto.Message) {
+	b, err := t.pack(msgType, msg)
+	if err != nil {
+		log.Error(err)
+		return
+	}
+
+	nodes := t.group.GetLearnNodes()
+	for _, addr := range nodes {
 		if err = t.sender.SendMessage(addr, b); err != nil {
 			log.Error(err)
 		}
