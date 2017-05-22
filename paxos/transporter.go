@@ -17,42 +17,40 @@ import (
 	"github.com/gogo/protobuf/proto"
 	"github.com/sosozhuang/paxos/comm"
 	"hash/crc32"
+	"errors"
 )
 
 type Transporter interface {
-	send(uint64, comm.MsgType, proto.Message)
+	send(uint64, comm.MsgType, proto.Message) error
 	broadcast(comm.MsgType, proto.Message)
 	broadcastToFollowers(comm.MsgType, proto.Message)
 	broadcastToLearnNodes(comm.MsgType, proto.Message)
 }
 
 type transporter struct {
-	nodeID   uint64
 	groupCfg comm.GroupConfig
 	sender   comm.Sender
 }
 
-func NewTransporter(nodeID uint64, groupCfg comm.GroupConfig, sender comm.Sender) Transporter {
+func newTransporter(groupCfg comm.GroupConfig, sender comm.Sender) Transporter {
 	return &transporter{
-		nodeID:   nodeID,
 		groupCfg: groupCfg,
 		sender:   sender,
 	}
 }
 
-func (t *transporter) send(nodeID uint64, msgType comm.MsgType, msg proto.Message) {
+func (t *transporter) send(nodeID uint64, msgType comm.MsgType, msg proto.Message) error {
 	b, err := t.pack(msgType, msg)
 	if err != nil {
 		log.Error(err)
-		return
+		return err
 	}
 
 	addr, ok := t.groupCfg.GetMembers()[nodeID]
 	if !ok {
-		log.Error("can't find node")
-		return
+		return errors.New("can't find node")
 	}
-	t.sender.SendMessage(addr, b)
+	return t.sender.SendMessage(addr, b)
 }
 
 func (t *transporter) pack(msgType comm.MsgType, pb proto.Message) ([]byte, error) {
@@ -103,7 +101,7 @@ func (t *transporter) broadcast(msgType comm.MsgType, msg proto.Message) {
 
 	members := t.groupCfg.GetMembers()
 	for id, addr := range members {
-		if id != t.nodeID {
+		if id != t.groupCfg.GetNodeID() {
 			if err = t.sender.SendMessage(addr, b); err != nil {
 				log.Error(err)
 			}
