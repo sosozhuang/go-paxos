@@ -11,7 +11,7 @@
 // WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 // See the License for the specific language governing permissions and
 // limitations under the License.
-package paxos1
+package paxos
 
 import (
 	"errors"
@@ -20,11 +20,12 @@ import (
 	"github.com/sosozhuang/paxos/comm"
 	"github.com/sosozhuang/paxos/logger"
 	"github.com/sosozhuang/paxos/store"
+	"github.com/sosozhuang/paxos/util"
 	"hash/crc32"
 	"math"
 	"sync"
+	"sync/atomic"
 	"time"
-	"github.com/sosozhuang/paxos/util"
 )
 
 var (
@@ -32,10 +33,9 @@ var (
 )
 
 type Learner interface {
-	start()
+	start(<-chan struct{})
 	stop()
-	setStopped(<-chan struct{})
-	setInstanceID(comm.InstanceID)
+	setInstanceID(uint64)
 	newInstance()
 	AskForLearn(time.Duration)
 	onAskForLearn(*comm.PaxosMsg)
@@ -45,32 +45,32 @@ type Learner interface {
 	onAckSendValue(*comm.PaxosMsg)
 	onSendInstanceID(*comm.PaxosMsg)
 	onAskForCheckpoint(*comm.PaxosMsg)
-	proposalFinished(comm.InstanceID, proposalID)
+	proposalFinished(uint64, uint64)
 	isLearned() bool
 	isReadyForNewValue() bool
-	getChecksum() comm.Checksum
+	getChecksum() uint32
 	onSendCheckpoint(*comm.CheckpointMsg)
 	onAckSendCheckpoint(*comm.CheckpointMsg)
-	SendCheckpointBegin(comm.NodeID, uint64, uint64, comm.InstanceID)
-	SendCheckpointEnd(comm.NodeID, uint64, uint64, comm.InstanceID)
-	sendValue(comm.NodeID, comm.InstanceID, ballot, []byte, comm.Checksum, bool)
-	getInstanceID() comm.InstanceID
+	SendCheckpointBegin(uint64, uint64, uint64, uint64)
+	SendCheckpointEnd(uint64, uint64, uint64, uint64)
+	sendValue(uint64, uint64, ballot, []byte, uint32, bool)
+	getInstanceID() uint64
 	getValue() []byte
-	getLastSeenInstanceID() comm.InstanceID
+	getLastSeenInstanceID() uint64
 }
 
 type learner struct {
 	state              learnerState
 	acceptor           Acceptor
 	learning           bool
-	nodeID             comm.NodeID
-	instanceID         comm.InstanceID
-	lastAckInstanceID  comm.InstanceID
-	lastSeenInstanceID comm.InstanceID
-	lastSeenNodeID     comm.NodeID
+	nodeID             uint64
+	instanceID         uint64
+	lastAckInstanceID  uint64
+	lastSeenInstanceID uint64
+	lastSeenNodeID     uint64
 	done               chan struct{}
-	stopped <-chan struct{}
-	group comm.Group
+	stopped            <-chan struct{}
+	groupCfg           comm.GroupConfig
 	instance           comm.Instance
 	cpm                checkpoint.CheckpointManager
 	cps                checkpoint.Sender
@@ -79,29 +79,31 @@ type learner struct {
 	sender
 }
 
-func newLearner(nodeID comm.NodeID, instance comm.Instance, tp Transporter, st store.Storage, acceptor Acceptor, cpm checkpoint.CheckpointManager) (Learner, error) {
+func newLearner(nodeID uint64, groupCfg comm.GroupConfig, instance comm.Instance, tp Transporter, st store.Storage, acceptor Acceptor, cpm checkpoint.CheckpointManager) Learner {
 	learner := &learner{
-		nodeID: nodeID,
+		nodeID:   nodeID,
 		acceptor: acceptor,
+		groupCfg:    groupCfg,
 		instance: instance,
-		cpm: cpm,
-		tp: tp,
-		done: make(chan struct{}),
+		cpm:      cpm,
+		tp:       tp,
+		done:     make(chan struct{}),
 	}
 	learner.sender = sender{
 		Learner: learner,
-		st: st,
+		st:      st,
 	}
 
 	learner.cpr = &checkpoint.Receiver{Storage: st}
-	return learner, nil
+	return learner
 }
 
 func (l *learner) setStopped(stopped <-chan struct{}) {
 	l.stopped = stopped
 }
 
-func (l *learner) start() {
+func (l *learner) start(stopped <-chan struct{}) {
+	l.stopped = stopped
 	//l.sender.start()
 }
 
@@ -113,19 +115,19 @@ func (l *learner) stop() {
 }
 
 func (l *learner) newInstance() {
-	//atomic.AddUint64(&l.instanceID, 1)
+	atomic.AddUint64(&l.instanceID, 1)
 	l.state.reset()
 }
 
-func (l *learner) setInstanceID(id comm.InstanceID) {
+func (l *learner) setInstanceID(id uint64) {
 	l.instanceID = id
 }
 
-func (l *learner) getLastSeenInstanceID() comm.InstanceID {
+func (l *learner) getLastSeenInstanceID() uint64 {
 	return l.lastSeenInstanceID
 }
 
-func (l *learner) setLastSeenInstanceID(instanceID comm.InstanceID, nodeID comm.NodeID) {
+func (l *learner) setLastSeenInstanceID(instanceID, nodeID uint64) {
 	if instanceID > l.lastSeenInstanceID {
 		l.lastSeenInstanceID = instanceID
 		l.lastSeenNodeID = nodeID
@@ -136,13 +138,13 @@ func (l *learner) getValue() []byte {
 	return l.state.value
 }
 
-func (l *learner) proposalFinished(instanceID comm.InstanceID, proposalID proposalID) {
+func (l *learner) proposalFinished(instanceID, proposalID uint64) {
 	msg := &comm.PaxosMsg{
 		Type:       comm.PaxosMsgType_ProposalFinished.Enum(),
-		InstanceID: proto.Uint64(uint64(instanceID)),
-		NodeID:     proto.Uint64(uint64(l.nodeID)),
-		ProposalID: proto.Uint64(uint64(proposalID)),
-		Checksum:   proto.Uint32(uint32(l.instance.GetChecksum())),
+		InstanceID: proto.Uint64(instanceID),
+		NodeID:     proto.Uint64(l.nodeID),
+		ProposalID: proto.Uint64(proposalID),
+		Checksum:   proto.Uint32(l.instance.GetChecksum()),
 	}
 
 	l.instance.ReceivePaxosMessage(msg)
@@ -150,14 +152,14 @@ func (l *learner) proposalFinished(instanceID comm.InstanceID, proposalID propos
 }
 
 func (l *learner) onProposalFinished(msg *comm.PaxosMsg) {
-	if l.instanceID != comm.InstanceID(msg.GetInstanceID()) {
+	if l.instanceID != msg.GetInstanceID() {
 		return
 	}
 	if !l.acceptor.getAcceptorState().acceptedBallot.valid() {
 		return
 	}
 
-	b := ballot{proposalID(msg.GetProposalID()), comm.NodeID(msg.GetProposalNodeID())}
+	b := ballot{msg.GetProposalID(), msg.GetProposalNodeID()}
 	if l.acceptor.getAcceptorState().acceptedBallot.ne(b) {
 		return
 	}
@@ -169,26 +171,26 @@ func (l *learner) onProposalFinished(msg *comm.PaxosMsg) {
 func (l *learner) broadcastToFollowers() {
 	msg := &comm.PaxosMsg{
 		Type:           comm.PaxosMsgType_SendValue.Enum(),
-		InstanceID:     proto.Uint64(uint64(l.instanceID)),
-		NodeID:         proto.Uint64(uint64(l.nodeID)),
-		ProposalNodeID: proto.Uint64(uint64(l.acceptor.getAcceptorState().acceptedBallot.nodeID)),
-		ProposalID:     proto.Uint64(uint64(l.acceptor.getAcceptorState().acceptedBallot.proposalID)),
+		InstanceID:     proto.Uint64(l.instanceID),
+		NodeID:         proto.Uint64(l.nodeID),
+		ProposalNodeID: proto.Uint64(l.acceptor.getAcceptorState().acceptedBallot.nodeID),
+		ProposalID:     proto.Uint64(l.acceptor.getAcceptorState().acceptedBallot.proposalID),
 		Value:          l.acceptor.getAcceptorState().acceptedValue,
-		Checksum:       proto.Uint32(uint32(l.instance.GetChecksum())),
+		Checksum:       proto.Uint32(l.instance.GetChecksum()),
 	}
 
 	l.tp.broadcastToFollowers(comm.MsgType_Paxos, msg)
 }
 
-func (l *learner) sendValue(nodeID comm.NodeID, instanceID comm.InstanceID, b ballot, value []byte, cs comm.Checksum, ack bool) {
+func (l *learner) sendValue(nodeID, instanceID uint64, b ballot, value []byte, checksum uint32, ack bool) {
 	msg := &comm.PaxosMsg{
 		Type:           comm.PaxosMsgType_SendValue.Enum(),
-		InstanceID:     proto.Uint64(uint64(instanceID)),
-		NodeID:         proto.Uint64(uint64(l.nodeID)),
-		ProposalID:     proto.Uint64(uint64(b.proposalID)),
-		ProposalNodeID: proto.Uint64(uint64(b.nodeID)),
+		InstanceID:     proto.Uint64(instanceID),
+		NodeID:         proto.Uint64(l.nodeID),
+		ProposalID:     proto.Uint64(b.proposalID),
+		ProposalNodeID: proto.Uint64(b.nodeID),
 		Value:          value,
-		Checksum:       proto.Uint32(uint32(cs)),
+		Checksum:       proto.Uint32(checksum),
 	}
 	if ack {
 		msg.AckFlag = proto.Bool(ack)
@@ -197,21 +199,21 @@ func (l *learner) sendValue(nodeID comm.NodeID, instanceID comm.InstanceID, b ba
 }
 
 func (l *learner) onSendValue(msg *comm.PaxosMsg) {
-	if comm.InstanceID(msg.GetInstanceID()) != l.instanceID {
+	if msg.GetInstanceID() != l.instanceID {
 		return
 	}
-	b := ballot{proposalID(msg.GetProposalID()), comm.NodeID(msg.GetProposalNodeID())}
+	b := ballot{msg.GetProposalID(), msg.GetProposalNodeID()}
 	if err := l.state.learnAndSave(msg.GetInstanceID(), b, msg.GetValue(), 0); err != nil {
 		llog.Error(err)
 		return
 	}
 	if msg.GetAckFlag() {
 		l.AskForLearn(time.Second * 3)
-		l.ackSendValue(comm.NodeID(msg.GetNodeID()))
+		l.ackSendValue(msg.GetNodeID())
 	}
 }
 
-func (l *learner) ackSendValue(nodeID comm.NodeID) {
+func (l *learner) ackSendValue(nodeID uint64) {
 	if l.instanceID < l.lastAckInstanceID+25 {
 		return
 	}
@@ -219,14 +221,14 @@ func (l *learner) ackSendValue(nodeID comm.NodeID) {
 
 	msg := &comm.PaxosMsg{
 		Type:       comm.PaxosMsgType_AckSendValue.Enum(),
-		InstanceID: proto.Uint64(uint64(l.instanceID)),
-		NodeID:     proto.Uint64(uint64(l.nodeID)),
+		InstanceID: proto.Uint64(l.instanceID),
+		NodeID:     proto.Uint64(l.nodeID),
 	}
 	l.tp.send(nodeID, comm.MsgType_Paxos, msg)
 }
 
 func (l *learner) onAckSendValue(msg *comm.PaxosMsg) {
-	l.sender.ack(comm.InstanceID(msg.GetInstanceID()), comm.NodeID(msg.GetNodeID()))
+	l.sender.ack(msg.GetInstanceID(), msg.GetNodeID())
 }
 
 func (l *learner) AskForLearn(d time.Duration) {
@@ -252,30 +254,30 @@ func (l *learner) askForLearn() {
 	l.cpm.ExitAskForCheckpoint()
 	msg := &comm.PaxosMsg{
 		Type:       comm.PaxosMsgType_AskForLearn.Enum(),
-		NodeID:     proto.Uint64(uint64(l.nodeID)),
-		InstanceID: proto.Uint64(uint64(l.instanceID)),
+		NodeID:     proto.Uint64(l.nodeID),
+		InstanceID: proto.Uint64(l.instanceID),
 	}
 	// todo: check if in follower mode
-	if l.group.FollowerMode() {
-		msg.ProposalNodeID = proto.Uint64(uint64(l.group.FollowNodeID()))
+	if l.groupCfg.FollowerMode() {
+		msg.ProposalNodeID = proto.Uint64(l.groupCfg.GetFollowNodeID())
 	}
 	l.tp.broadcast(comm.MsgType_Paxos, msg)
 	l.tp.broadcastToLearnNodes(comm.MsgType_Paxos, msg)
 }
 
 func (l *learner) onAskForLearn(msg *comm.PaxosMsg) {
-	l.setLastSeenInstanceID(comm.InstanceID(msg.GetInstanceID()), comm.NodeID(msg.GetNodeID()))
-	if comm.NodeID(msg.GetProposalNodeID()) == l.nodeID {
+	l.setLastSeenInstanceID(msg.GetInstanceID(), msg.GetNodeID())
+	if msg.GetProposalNodeID() == l.nodeID {
 		// todo: add follower node
-		l.group.AddFollower(comm.NodeID(msg.GetNodeID()))
+		l.groupCfg.AddFollower(msg.GetNodeID())
 	}
-	if comm.InstanceID(msg.GetInstanceID()) >= l.instanceID {
+	if msg.GetInstanceID() >= l.instanceID {
 		return
 	}
-	if comm.InstanceID(msg.GetInstanceID()) >= l.cpm.GetMinChosenInstanceID() {
-		if !l.sender.prepare(comm.InstanceID(msg.GetInstanceID()), comm.NodeID(msg.GetNodeID())) {
-			if comm.InstanceID(msg.GetInstanceID()) == l.instanceID-1 {
-				value, err := l.st.Get(comm.InstanceID(msg.GetInstanceID()))
+	if msg.GetInstanceID() >= l.cpm.GetMinChosenInstanceID() {
+		if !l.sender.prepare(msg.GetInstanceID(), msg.GetNodeID()) {
+			if msg.GetInstanceID() == l.instanceID-1 {
+				value, err := l.st.Get(msg.GetInstanceID())
 				if err != nil {
 					log.Error(err)
 					return
@@ -285,38 +287,38 @@ func (l *learner) onAskForLearn(msg *comm.PaxosMsg) {
 					log.Error(err)
 					return
 				}
-				b := ballot{proposalID(state.GetAcceptedID()), comm.NodeID(state.GetAcceptedNodeID())}
-				l.sendValue(comm.NodeID(msg.GetNodeID()), comm.InstanceID(msg.GetInstanceID()), b, state.GetAcceptedValue(), 0, false)
+				b := ballot{state.GetAcceptedID(), state.GetAcceptedNodeID()}
+				l.sendValue(msg.GetNodeID(), msg.GetInstanceID(), b, state.GetAcceptedValue(), 0, false)
 			}
 			return
 		}
 	}
-	l.sendInstanceID(comm.InstanceID(msg.GetInstanceID()), comm.NodeID(msg.GetNodeID()))
+	l.sendInstanceID(msg.GetInstanceID(), msg.GetNodeID())
 }
 
-func (l *learner) confirmAskForLearn(nodeID comm.NodeID) {
+func (l *learner) confirmAskForLearn(nodeID uint64) {
 	msg := &comm.PaxosMsg{
 		Type:       comm.PaxosMsgType_ConfirmAskForLearn.Enum(),
-		InstanceID: proto.Uint64(uint64(l.instanceID)),
-		NodeID:     proto.Uint64(uint64(l.nodeID)),
+		InstanceID: proto.Uint64(l.instanceID),
+		NodeID:     proto.Uint64(l.nodeID),
 	}
 	l.tp.send(nodeID, comm.MsgType_Paxos, msg)
 	l.learning = true
 }
 
 func (l *learner) onConfirmAskForLearn(msg *comm.PaxosMsg) {
-	if !l.sender.confirm(comm.InstanceID(msg.GetInstanceID()), comm.NodeID(msg.GetNodeID())) {
+	if !l.sender.confirm(msg.GetInstanceID(), msg.GetNodeID()) {
 		llog.Error("confirm failed.")
 	}
 }
 
-func (l *learner) sendInstanceID(instanceID comm.InstanceID, nodeID comm.NodeID) {
+func (l *learner) sendInstanceID(instanceID, nodeID uint64) {
 	msg := &comm.PaxosMsg{
 		Type:                comm.PaxosMsgType_SendInstanceID.Enum(),
-		InstanceID:          proto.Uint64(uint64(instanceID)),
-		NodeID:              proto.Uint64(uint64(l.nodeID)),
-		CurInstanceID:       proto.Uint64(uint64(l.instanceID)),
-		MinChosenInstanceID: proto.Uint64(uint64(l.cpm.GetMinChosenInstanceID())),
+		InstanceID:          proto.Uint64(instanceID),
+		NodeID:              proto.Uint64(l.nodeID),
+		CurInstanceID:       proto.Uint64(l.instanceID),
+		MinChosenInstanceID: proto.Uint64(l.cpm.GetMinChosenInstanceID()),
 	}
 	if l.instanceID-instanceID > 50 {
 		// todo: add systemvar mastervar bytes
@@ -327,20 +329,20 @@ func (l *learner) sendInstanceID(instanceID comm.InstanceID, nodeID comm.NodeID)
 }
 
 func (l *learner) onSendInstanceID(msg *comm.PaxosMsg) {
-	l.setLastSeenInstanceID(comm.InstanceID(msg.GetCurInstanceID()), comm.NodeID(msg.GetNodeID()))
+	l.setLastSeenInstanceID(msg.GetCurInstanceID(), msg.GetNodeID())
 
 	// todo: check systemvar and mastervar
 
-	if comm.InstanceID(msg.GetInstanceID()) != l.instanceID {
+	if msg.GetInstanceID() != l.instanceID {
 		return
 	}
-	if comm.InstanceID(msg.GetCurInstanceID()) <= l.instanceID {
+	if msg.GetCurInstanceID() <= l.instanceID {
 		return
 	}
-	if comm.InstanceID(msg.GetMinChosenInstanceID()) > l.instanceID {
-		l.askForCheckpoint(comm.NodeID(msg.GetNodeID()))
+	if msg.GetMinChosenInstanceID() > l.instanceID {
+		l.askForCheckpoint(msg.GetNodeID())
 	} else if !l.learning {
-		l.confirmAskForLearn(comm.NodeID(msg.GetNodeID()))
+		l.confirmAskForLearn(msg.GetNodeID())
 	}
 }
 
@@ -352,19 +354,19 @@ func (l *learner) isReadyForNewValue() bool {
 	return l.instanceID+1 >= l.lastSeenInstanceID
 }
 
-func (l *learner) getChecksum() comm.Checksum {
+func (l *learner) getChecksum() uint32 {
 	return l.state.checksum
 }
 
-func (l *learner) askForCheckpoint(nodeID comm.NodeID) {
+func (l *learner) askForCheckpoint(nodeID uint64) {
 	if err := l.cpm.PrepareAskForCheckpoint(nodeID); err != nil {
 		log.Error(err)
 		return
 	}
 	msg := &comm.PaxosMsg{
 		Type:       comm.PaxosMsgType_AskForCheckpoint.Enum(),
-		NodeID:     proto.Uint64(uint64(l.nodeID)),
-		InstanceID: proto.Uint64(uint64(l.instanceID)),
+		NodeID:     proto.Uint64(l.nodeID),
+		InstanceID: proto.Uint64(l.instanceID),
 	}
 	l.tp.send(nodeID, comm.MsgType_Paxos, msg)
 }
@@ -381,42 +383,42 @@ func (l *learner) onAskForCheckpoint(msg *comm.PaxosMsg) {
 	}
 }
 
-func (l *learner) SendCheckpointBegin(nodeID comm.NodeID, uuid uint64, sequence uint64, checkpointInstanceID comm.InstanceID) {
+func (l *learner) SendCheckpointBegin(nodeID, uuid, sequence, checkpointInstanceID uint64) {
 	msg := &comm.CheckpointMsg{
 		Type:                 comm.CheckpointMsgType_SendFile.Enum(),
-		NodeID:               proto.Uint64(uint64(l.nodeID)),
+		NodeID:               proto.Uint64(l.nodeID),
 		Flag:                 comm.CheckPointMsgFlag_Begin.Enum(),
-		UUID:                 proto.Uint64(uint64(uuid)),
-		Sequence:             proto.Uint64(uint64(sequence)),
-		CheckpointInstanceID: proto.Uint64(uint64(checkpointInstanceID)),
+		UUID:                 proto.Uint64(uuid),
+		Sequence:             proto.Uint64(sequence),
+		CheckpointInstanceID: proto.Uint64(checkpointInstanceID),
 	}
 	l.tp.send(nodeID, comm.MsgType_Checkpoint, msg)
 }
 
-func (l *learner) SendCheckpointEnd(nodeID comm.NodeID, uuid uint64, sequence uint64, checkpointInstanceID comm.InstanceID) {
+func (l *learner) SendCheckpointEnd(nodeID, uuid, sequence, checkpointInstanceID uint64) {
 	msg := &comm.CheckpointMsg{
 		Type:                 comm.CheckpointMsgType_SendFile.Enum(),
-		NodeID:               proto.Uint64(uint64(l.nodeID)),
+		NodeID:               proto.Uint64(l.nodeID),
 		Flag:                 comm.CheckPointMsgFlag_End.Enum(),
-		UUID:                 proto.Uint64(uint64(uuid)),
-		Sequence:             proto.Uint64(uint64(sequence)),
-		CheckpointInstanceID: proto.Uint64(uint64(checkpointInstanceID)),
+		UUID:                 proto.Uint64(uuid),
+		Sequence:             proto.Uint64(sequence),
+		CheckpointInstanceID: proto.Uint64(checkpointInstanceID),
 	}
 	l.tp.send(nodeID, comm.MsgType_Checkpoint, msg)
 }
 
-func (l *learner) sendCheckpoint(nodeID comm.NodeID, uuid uint64, sequence uint64, checkpointInstanceID comm.InstanceID,
-	cs comm.Checksum, path string, smid comm.StateMachineID, offset int64, b []byte) {
+func (l *learner) sendCheckpoint(nodeID, uuid, sequence, checkpointInstanceID uint64,
+	checksum uint32, path string, smid uint32, offset int64, b []byte) {
 	msg := &comm.CheckpointMsg{
 		Type:                 comm.CheckpointMsgType_SendFile.Enum(),
-		NodeID:               proto.Uint64(uint64(l.nodeID)),
+		NodeID:               proto.Uint64(l.nodeID),
 		Flag:                 comm.CheckPointMsgFlag_Progressing.Enum(),
-		UUID:                 proto.Uint64(uint64(uuid)),
-		Sequence:             proto.Uint64(uint64(sequence)),
-		CheckpointInstanceID: proto.Uint64(uint64(checkpointInstanceID)),
-		Checksum:             proto.Uint32(uint32(cs)),
+		UUID:                 proto.Uint64(uuid),
+		Sequence:             proto.Uint64(sequence),
+		CheckpointInstanceID: proto.Uint64(checkpointInstanceID),
+		Checksum:             proto.Uint32(checksum),
 		FilePath:             proto.String(path),
-		SMID:                 proto.Int32(int32(smid)),
+		SMID:                 proto.Uint32(smid),
 		Offset:               proto.Int64(offset),
 		Buffer:               b,
 	}
@@ -424,10 +426,10 @@ func (l *learner) sendCheckpoint(nodeID comm.NodeID, uuid uint64, sequence uint6
 }
 
 func (l *learner) onSendCheckpointBegin(msg *comm.CheckpointMsg) error {
-	if err := l.cpr.Prepare(comm.NodeID(msg.GetNodeID()), msg.GetUUID()); err != nil {
+	if err := l.cpr.Prepare(msg.GetNodeID(), msg.GetUUID()); err != nil {
 		return err
 	}
-	return l.cpm.SaveMinChosenInstanceID(comm.InstanceID(msg.GetCheckpointInstanceID()))
+	return l.cpm.SaveMinChosenInstanceID(msg.GetCheckpointInstanceID())
 }
 
 func (l *learner) onSendCheckpointProgressing(msg *comm.CheckpointMsg) error {
@@ -435,7 +437,7 @@ func (l *learner) onSendCheckpointProgressing(msg *comm.CheckpointMsg) error {
 }
 
 func (l *learner) onSendCheckpointEnd(msg *comm.CheckpointMsg) error {
-	if l.cpr.IsFinished(comm.NodeID(msg.GetNodeID()), msg.GetUUID(), msg.GetSequence()) {
+	if l.cpr.IsFinished(msg.GetNodeID(), msg.GetUUID(), msg.GetSequence()) {
 		return errors.New("")
 	}
 	// todo: LoadCheckpointState for state machine
@@ -456,17 +458,17 @@ func (l *learner) onSendCheckpoint(msg *comm.CheckpointMsg) {
 	if err != nil {
 		l.cpr.Reset()
 		l.AskForLearn(time.Second * 5)
-		l.ackSendCheckpoint(comm.NodeID(msg.GetNodeID()), msg.GetUUID(), msg.GetSequence(), comm.CheckPointMsgFlag_Failed)
+		l.ackSendCheckpoint(msg.GetNodeID(), msg.GetUUID(), msg.GetSequence(), comm.CheckPointMsgFlag_Failed)
 	} else {
-		l.ackSendCheckpoint(comm.NodeID(msg.GetNodeID()), msg.GetUUID(), msg.GetSequence(), comm.CheckPointMsgFlag_Successful)
+		l.ackSendCheckpoint(msg.GetNodeID(), msg.GetUUID(), msg.GetSequence(), comm.CheckPointMsgFlag_Successful)
 		l.AskForLearn(time.Minute * 2)
 	}
 }
 
-func (l *learner) ackSendCheckpoint(nodeID comm.NodeID, uuid, sequence uint64, flag comm.CheckPointMsgFlag) {
+func (l *learner) ackSendCheckpoint(nodeID, uuid, sequence uint64, flag comm.CheckPointMsgFlag) {
 	msg := &comm.CheckpointMsg{
 		Type:     comm.CheckpointMsgType_AckSendFile.Enum(),
-		NodeID:   proto.Uint64(uint64(l.nodeID)),
+		NodeID:   proto.Uint64(l.nodeID),
 		UUID:     proto.Uint64(uuid),
 		Sequence: proto.Uint64(sequence),
 		Flag:     flag.Enum(),
@@ -477,7 +479,7 @@ func (l *learner) ackSendCheckpoint(nodeID comm.NodeID, uuid, sequence uint64, f
 func (l *learner) onAckSendCheckpoint(msg *comm.CheckpointMsg) {
 	if l.cps != nil && !l.cps.IsFinished() {
 		if msg.GetFlag() == comm.CheckPointMsgFlag_Successful {
-			l.cps.Ack(comm.NodeID(msg.GetNodeID()), msg.GetUUID(), msg.GetSequence())
+			l.cps.Ack(msg.GetNodeID(), msg.GetUUID(), msg.GetSequence())
 		} else {
 			l.cps.Stop()
 		}
@@ -485,44 +487,44 @@ func (l *learner) onAckSendCheckpoint(msg *comm.CheckpointMsg) {
 }
 
 type learnerState struct {
-	checksum comm.Checksum
-	learned bool
-	value   []byte
-	st      store.Storage
+	checksum uint32
+	learned  bool
+	value    []byte
+	st       store.Storage
 }
 
 func (l *learnerState) reset() {
 	l.learned = false
 	l.value = nil
-	l.checksum = comm.Checksum(0)
+	l.checksum = 0
 }
 
-func (l *learnerState) learn(value []byte, cs comm.Checksum) {
+func (l *learnerState) learn(value []byte, checksum uint32) {
 	l.value = value
 	l.learned = true
-	l.checksum = cs
+	l.checksum = checksum
 }
 
-func (l *learnerState) learnAndSave(instanceID uint64, b ballot, value []byte, cs uint32) error {
-	if instanceID > 0 && cs == 0 {
+func (l *learnerState) learnAndSave(instanceID uint64, b ballot, value []byte, checksum uint32) error {
+	if instanceID > 0 && checksum == 0 {
 		l.checksum = 0
 	} else if l.value != nil && len(l.value) > 0 {
-		l.checksum = comm.Checksum(crc32.Update(cs, crcTable, l.value))
+		l.checksum = crc32.Update(checksum, crcTable, l.value)
 	}
 	state := &comm.AcceptorStateData{
 		InstanceID:     proto.Uint64(instanceID),
 		AcceptedValue:  l.value,
-		PromisedID:     proto.Uint64(uint64(b.proposalID)),
-		PromisedNodeID: proto.Uint64(uint64(b.nodeID)),
-		AcceptedID:     proto.Uint64(uint64(b.proposalID)),
-		AcceptedNodeID: proto.Uint64(uint64(b.nodeID)),
-		Checksum:       proto.Uint32(uint32(l.checksum)),
+		PromisedID:     proto.Uint64(b.proposalID),
+		PromisedNodeID: proto.Uint64(b.nodeID),
+		AcceptedID:     proto.Uint64(b.proposalID),
+		AcceptedNodeID: proto.Uint64(b.nodeID),
+		Checksum:       proto.Uint32(l.checksum),
 	}
 	v, err := proto.Marshal(state)
 	if err != nil {
 		return err
 	}
-	if err := l.st.Set(comm.InstanceID(instanceID), v); err != nil {
+	if err := l.st.Set(instanceID, v); err != nil {
 		return err
 	}
 
@@ -536,9 +538,9 @@ type sender struct {
 	confirmed       bool
 	lastSendTime    time.Time
 	lastAckTime     time.Time
-	nodeID          comm.NodeID
-	startInstanceID comm.InstanceID
-	ackInstanceID   comm.InstanceID
+	nodeID          uint64
+	startInstanceID uint64
+	ackInstanceID   uint64
 	wg              sync.WaitGroup
 	mu              sync.Mutex
 	st              store.Storage
@@ -575,7 +577,7 @@ func (s *sender) stop() {
 	s.wg.Wait()
 }
 
-func (s *sender) checkAck(instanceID comm.InstanceID) bool {
+func (s *sender) checkAck(instanceID uint64) bool {
 	if instanceID < s.ackInstanceID {
 		return false
 	}
@@ -588,7 +590,7 @@ func (s *sender) checkAck(instanceID comm.InstanceID) bool {
 	return true
 }
 
-func (s *sender) ack(ackInstanceID comm.InstanceID, nodeID comm.NodeID) {
+func (s *sender) ack(ackInstanceID, nodeID uint64) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.isPrepared() && s.confirmed {
@@ -601,25 +603,25 @@ func (s *sender) ack(ackInstanceID comm.InstanceID, nodeID comm.NodeID) {
 	}
 }
 
-func (s *sender) prepare(start comm.InstanceID, nodeID comm.NodeID) bool {
+func (s *sender) prepare(instanceID, nodeID uint64) bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if !s.isPrepared() && !s.confirmed {
 		s.prepared = true
 		s.lastSendTime = time.Now()
-		s.startInstanceID = start
-		s.ackInstanceID = start
+		s.startInstanceID = instanceID
+		s.ackInstanceID = instanceID
 		s.nodeID = nodeID
 		return true
 	}
 	return false
 }
 
-func (s *sender) confirm(start comm.InstanceID, nodeID comm.NodeID) bool {
+func (s *sender) confirm(instanceID, nodeID uint64) bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.isPrepared() && !s.confirmed {
-		if s.startInstanceID == start && s.nodeID == nodeID {
+		if s.startInstanceID == instanceID && s.nodeID == nodeID {
 			s.confirmed = true
 			s.wg.Add(1)
 			go s.start()
@@ -629,9 +631,9 @@ func (s *sender) confirm(start comm.InstanceID, nodeID comm.NodeID) bool {
 	return false
 }
 
-func (s *sender) send(instanceID comm.InstanceID, nodeID comm.NodeID) {
+func (s *sender) send(instanceID uint64, nodeID uint64) {
 	var (
-		cs       comm.Checksum
+		cs       uint32
 		err      error
 		sleep    time.Duration
 		interval int
@@ -661,17 +663,17 @@ func (s *sender) send(instanceID comm.InstanceID, nodeID comm.NodeID) {
 	}
 }
 
-func (s *sender) sendValue(instanceID comm.InstanceID, nodeID comm.NodeID, cs comm.Checksum) (comm.Checksum, error) {
+func (s *sender) sendValue(instanceID, nodeID uint64, checksum uint32) (uint32, error) {
 	value, err := s.st.Get(instanceID)
 	if err != nil {
-		return cs, err
+		return checksum, err
 	}
 	var state comm.AcceptorStateData
 	if err = proto.Unmarshal(value, &state); err != nil {
-		return cs, err
+		return checksum, err
 	}
-	b := ballot{proposalID(state.GetAcceptedID()), comm.NodeID(state.GetAcceptedNodeID())}
-	s.Learner.sendValue(nodeID, instanceID, b, state.GetAcceptedValue(), cs, true)
+	b := ballot{state.GetAcceptedID(), state.GetAcceptedNodeID()}
+	s.Learner.sendValue(nodeID, instanceID, b, state.GetAcceptedValue(), checksum, true)
 
-	return cs, nil
+	return checksum, nil
 }

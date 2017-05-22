@@ -32,12 +32,12 @@ type transporter struct {
 	sender   comm.Sender
 }
 
-func NewTransporter(nodeID uint64, groupCfg comm.GroupConfig, sender comm.Sender) (Transporter, error) {
+func NewTransporter(nodeID uint64, groupCfg comm.GroupConfig, sender comm.Sender) Transporter {
 	return &transporter{
-		nodeID: nodeID,
+		nodeID:   nodeID,
 		groupCfg: groupCfg,
-		sender: sender,
-	}, nil
+		sender:   sender,
+	}
 }
 
 func (t *transporter) send(nodeID uint64, msgType comm.MsgType, msg proto.Message) {
