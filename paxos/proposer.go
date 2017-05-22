@@ -37,8 +37,7 @@ type Proposer interface {
 
 type proposer struct {
 	state                proposerState
-	nodeID               uint64
-	instance             comm.Instance
+	instance             Instance
 	instanceID           uint64
 	learner              Learner
 	preparing            bool
@@ -68,14 +67,13 @@ const (
 	maxAcceptTimeout    = time.Second * 8
 )
 
-func newProposer(nodeID uint64, instance comm.Instance, tp Transporter, learner Learner) Proposer {
+func newProposer(instance Instance, tp Transporter, learner Learner) Proposer {
 	state := proposerState{
 		proposalID:     1,
 		lastProposalID: 0,
 	}
 	return &proposer{
 		state:                state,
-		nodeID:               nodeID,
 		instance:             instance,
 		learner:              learner,
 		rejectNodes:          make(map[uint64]struct{}),
@@ -145,7 +143,7 @@ func (p *proposer) prepare(ctx context.Context, done chan struct{}, rejected boo
 	msg := &comm.PaxosMsg{
 		Type:       comm.PaxosMsgType_Prepare.Enum(),
 		InstanceID: proto.Uint64(p.instanceID),
-		NodeID:     proto.Uint64(p.nodeID),
+		NodeID:     proto.Uint64(p.instance.getNodeID()),
 		ProposalID: proto.Uint64(p.state.proposalID),
 	}
 
@@ -157,7 +155,7 @@ func (p *proposer) prepare(ctx context.Context, done chan struct{}, rejected boo
 }
 
 func (p *proposer) getMajorityCount() int {
-	return p.instance.GetMajorityCount()
+	return p.instance.getMajorityCount()
 }
 
 func (p *proposer) broadcastPrepareMessage(ctx context.Context, done chan struct{}, msg *comm.PaxosMsg) {
@@ -276,10 +274,10 @@ func (p *proposer) accept(ctx context.Context, done chan struct{}) {
 	msg := &comm.PaxosMsg{
 		Type:       comm.PaxosMsgType_Accept.Enum(),
 		InstanceID: proto.Uint64(p.instanceID),
-		NodeID:     proto.Uint64(p.nodeID),
+		NodeID:     proto.Uint64(p.instance.getNodeID()),
 		ProposalID: proto.Uint64(p.state.proposalID),
 		Value:      p.state.value,
-		Checksum:   proto.Uint32(p.instance.GetChecksum()),
+		Checksum:   proto.Uint32(p.instance.getChecksum()),
 	}
 
 	select {
