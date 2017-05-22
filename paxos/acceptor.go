@@ -40,19 +40,17 @@ type Acceptor interface {
 }
 
 type acceptor struct {
-	nodeID     uint64
 	instanceID uint64
-	instance   comm.Instance
+	instance   Instance
 	tp         Transporter
 	state      acceptorState
 }
 
-func newAcceptor(nodeID uint64, instance comm.Instance, tp Transporter, st store.Storage) Acceptor {
+func newAcceptor(instance Instance, tp Transporter, st store.Storage) Acceptor {
 	s := acceptorState{
 		st: st,
 	}
 	return &acceptor{
-		nodeID:   nodeID,
 		instance: instance,
 		tp:       tp,
 		state:    s,
@@ -101,7 +99,7 @@ func (a *acceptor) onPrepare(msg *comm.PaxosMsg) {
 	replyMsg := &comm.PaxosMsg{
 		Type:       comm.PaxosMsgType_PrepareReply.Enum(),
 		InstanceID: proto.Uint64(a.instanceID),
-		NodeID:     proto.Uint64(a.nodeID),
+		NodeID:     proto.Uint64(a.instance.getNodeID()),
 		ProposalID: proto.Uint64(msg.GetProposalID()),
 	}
 	b := ballot{msg.GetProposalID(), msg.GetProposalNodeID()}
@@ -110,7 +108,7 @@ func (a *acceptor) onPrepare(msg *comm.PaxosMsg) {
 			replyMsg.Value = a.state.acceptedValue
 		}
 		a.state.promisedBallot = b
-		if err := a.state.save(a.instanceID, a.instance.GetChecksum()); err != nil {
+		if err := a.state.save(a.instanceID, a.instance.getChecksum()); err != nil {
 			alog.Error(err)
 			return
 		}
@@ -133,7 +131,7 @@ func (a *acceptor) onAccept(msg *comm.PaxosMsg) {
 	replyMsg := &comm.PaxosMsg{
 		Type:       comm.PaxosMsgType_AcceptReply.Enum(),
 		InstanceID: proto.Uint64(a.instanceID),
-		NodeID:     proto.Uint64(a.nodeID),
+		NodeID:     proto.Uint64(a.instance.getNodeID()),
 		ProposalID: proto.Uint64(msg.GetProposalID()),
 	}
 	b := ballot{msg.GetProposalID(), msg.GetProposalNodeID()}
@@ -141,7 +139,7 @@ func (a *acceptor) onAccept(msg *comm.PaxosMsg) {
 		a.state.promisedBallot = b
 		a.state.acceptedBallot = b
 		a.state.acceptedValue = msg.Value
-		if err := a.state.save(a.instanceID, a.instance.GetChecksum()); err != nil {
+		if err := a.state.save(a.instanceID, a.instance.getChecksum()); err != nil {
 			return
 		}
 	} else {
