@@ -197,11 +197,13 @@ func NewNode(cfg NodeConfig) (n *node, err error) {
 
 	if n.cfg.EnableMaster {
 		n.masters = make([]election.Master, n.cfg.GroupCount)
-		masterCfg := election.MasterConfig{
-			LeaseTimeout: n.cfg.LeaseTimeout,
-		}
 		for i := uint16(0); i < uint16(n.cfg.GroupCount); i++ {
-			if n.masters[i], err = election.NewMaster(masterCfg, n.cfg.id, i, n, n.storage.GetStorage(i)); err != nil {
+			masterCfg := election.MasterConfig{
+				NodeID: n.cfg.id,
+				GroupID: i,
+				LeaseTimeout: n.cfg.LeaseTimeout,
+			}
+			if n.masters[i], err = election.NewMaster(masterCfg, n, n.storage.GetStorage(i)); err != nil {
 				log.Error(err)
 				return
 			}
@@ -213,12 +215,12 @@ func NewNode(cfg NodeConfig) (n *node, err error) {
 		groupCfg := groupConfig{
 			nodeID: n.cfg.id,
 			groupID: i,
-			st: n.storage.GetStorage(i),
 			followerMode: false,
 			followNodeID: comm.UnknownNodeID,
 			enableMemberShip: n.cfg.EnableMemberShip,
+			masterSM: n.masters[i].GetStateMachine(),
 		}
-		if n.groups[i], err = newGroup(groupCfg, n.masters[i].GetStateMachine(), n.network); err != nil {
+		if n.groups[i], err = newGroup(groupCfg, n.network, n.storage.GetStorage(i)); err != nil {
 			log.Error(err)
 			return
 		}
