@@ -31,6 +31,16 @@ var (
 	errChecksumFailed = errors.New("checksum failed")
 )
 
+type Instance interface {
+	getNodeID() uint64
+	getChecksum() uint32
+	getMajorityCount() int
+	ReceivePaxosMessage(*comm.PaxosMsg)
+	lockCheckpointState() error
+	unlockCheckpointState()
+	getAllCheckpoint() ([]uint32, []uint64, []string, [][]string)
+}
+
 type instance struct {
 	checksum uint32
 	sms      map[uint32]comm.StateMachine
@@ -45,8 +55,7 @@ type instance struct {
 	retries  *msgHeap
 }
 
-func NewInstance(nodeID uint64, tp Transporter, st store.Storage,
-	enableReplayer bool, groupCfg comm.GroupConfig) (comm.Instance, error) {
+func NewInstance(groupCfg comm.GroupConfig, sender comm.Sender, st store.Storage) (comm.Instance, error) {
 	var err error
 	i := &instance{
 		groupCfg:   groupCfg,
@@ -57,11 +66,12 @@ func NewInstance(nodeID uint64, tp Transporter, st store.Storage,
 	}
 	heap.Init(i.retries)
 
-	i.acceptor = newAcceptor(nodeID, i, tp, st)
-	i.learner = newLearner(nodeID, groupCfg, i, tp, st, i.acceptor, i.cpm)
-	i.proposer = newProposer(nodeID, i, tp, i.learner)
+	tp := newTransporter(groupCfg, sender)
+	i.acceptor = newAcceptor(i, tp, st)
+	i.learner = newLearner(groupCfg, i, tp, st, i.acceptor, i.cpm)
+	i.proposer = newProposer(i, tp, i.learner)
 
-	i.cpm, err = checkpoint.NewCheckpointManager(enableReplayer, st, groupCfg)
+	i.cpm, err = checkpoint.NewCheckpointManager(groupCfg, i, st)
 	if err != nil {
 		return nil, err
 	}
@@ -114,6 +124,14 @@ func (i *instance) Stop() {
 	}
 }
 
+func (i *instance) getNodeID() uint64 {
+	return i.groupCfg.GetNodeID()
+}
+
+func (i *instance) getMajorityCount() int {
+	return i.groupCfg.GetMajorityCount()
+}
+
 func (i *instance) initChecksum() error {
 	if i.acceptor.getInstanceID() == 0 ||
 		i.acceptor.getInstanceID() <= i.cpm.GetMinChosenInstanceID() {
@@ -149,7 +167,6 @@ func (i *instance) replay(start, end uint64) error {
 		if err = proto.Unmarshal(b, &state); err != nil {
 			return err
 		}
-		// todo: execute statemachine
 		if err = i.execute(id, state.GetAcceptedValue()); err != nil {
 			return err
 		}
@@ -157,7 +174,7 @@ func (i *instance) replay(start, end uint64) error {
 	return nil
 }
 
-func (i *instance) GetChecksum() uint32 {
+func (i *instance) getChecksum() uint32 {
 	return i.checksum
 }
 
@@ -206,28 +223,6 @@ func compare(a, b []byte) bool {
 		}
 	}
 	return true
-}
-
-type msgHeap []*comm.PaxosMsg
-
-func (h msgHeap) Len() int {
-	return len(h)
-}
-func (h msgHeap) Less(i, j int) bool {
-	return h[i].GetInstanceID() < h[j].GetInstanceID()
-}
-func (h msgHeap) Swap(i, j int) {
-	h[i], h[j] = h[j], h[i]
-}
-func (h *msgHeap) Push(x interface{}) {
-	*h = append(*h, x.(*comm.PaxosMsg))
-}
-func (h *msgHeap) Pop() interface{} {
-	old := *h
-	n := len(old)
-	x := old[n-1]
-	*h = old[0 : n-1]
-	return x
 }
 
 func (i *instance) handleRetry() {
@@ -430,10 +425,27 @@ func (i *instance) execute(instanceID uint64, v []byte) error {
 }
 
 func (i *instance) GetCheckpointInstanceID() uint64 {
-	//for _, sm := range i.sms {
-	//	sm
-	//}
-	return 0
+	a, b, id := comm.UnknownInstanceID, comm.UnknownInstanceID, comm.UnknownInstanceID
+	for _, sm := range i.sms {
+		id = sm.GetCheckpointInstanceID()
+		if id == comm.UnknownInstanceID {
+			continue
+		}
+		if sm.GetStateMachineID() == comm.MasterStateMachineID ||
+			sm.GetStateMachineID() == comm.SystemStateMachineID {
+			if id > a || a == comm.UnknownInstanceID {
+				a = id
+			}
+		} else {
+			if id > b || b == comm.UnknownInstanceID {
+				b = id
+			}
+		}
+	}
+	if b != comm.UnknownInstanceID {
+		return b
+	}
+	return a
 }
 
 func (i *instance) PauseReplayer() {
@@ -456,14 +468,78 @@ func (i *instance) SetMaxLogCount(c int) {
 	i.cpm.GetCleaner().SetMaxLogCount(c)
 }
 
-func (i *instance) GetMajorityCount() int {
-	return i.groupCfg.GetMajorityCount()
-}
-
 func (i *instance) GetProposerInstanceID() uint64 {
 	return i.proposer.getInstanceID()
 }
 
-func (i *instance) ExecuteForCheckpoint(uint64, []byte) error {
-	return nil
+func (i *instance) ExecuteForCheckpoint(instanceID uint64, v []byte) error {
+	var smid uint32
+	if err := comm.BytesToObject(v[:comm.SMIDLen], &smid); err != nil {
+		return err
+	}
+	sm, ok := i.sms[smid]
+	if !ok {
+		return errors.New("smid not found")
+	}
+	return sm.ExecuteForCheckpoint(instanceID, v[comm.SMIDLen:])
+}
+
+func (i *instance) lockCheckpointState() (err error) {
+	locks := make([]comm.StateMachine, 0)
+	defer func() {
+		if err != nil {
+			for _, sm := range locks {
+				sm.UnlockCheckpointState()
+			}
+		}
+	}()
+	for _, sm := range i.sms {
+		if err = sm.LockCheckpointState(); err != nil {
+			return
+		}
+		locks = append(locks, sm)
+	}
+	return
+}
+
+func (i *instance) unlockCheckpointState() {
+	for _, sm := range i.sms {
+		sm.UnlockCheckpointState()
+	}
+}
+
+func (i *instance) getAllCheckpoint() ([]uint32, []uint64, []string, [][]string) {
+	count := len(i.sms)
+	smids := make([]uint32, count)
+	iids := make([]uint64, count)
+	dirs := make([]string, count)
+	files := make([][]string, count)
+	for i, sm := range i.sms {
+		smids[i] = sm.GetStateMachineID()
+		iids[i] = sm.GetCheckpointInstanceID()
+		dirs[i], files[i] = sm.GetCheckpointState()
+	}
+	return smids, iids, dirs, files
+}
+
+type msgHeap []*comm.PaxosMsg
+
+func (h msgHeap) Len() int {
+	return len(h)
+}
+func (h msgHeap) Less(i, j int) bool {
+	return h[i].GetInstanceID() < h[j].GetInstanceID()
+}
+func (h msgHeap) Swap(i, j int) {
+	h[i], h[j] = h[j], h[i]
+}
+func (h *msgHeap) Push(x interface{}) {
+	*h = append(*h, x.(*comm.PaxosMsg))
+}
+func (h *msgHeap) Pop() interface{} {
+	old := *h
+	n := len(old)
+	x := old[n-1]
+	*h = old[0 : n-1]
+	return x
 }
