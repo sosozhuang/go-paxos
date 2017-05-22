@@ -35,6 +35,7 @@ var (
 type Learner interface {
 	start(<-chan struct{})
 	stop()
+	getInstanceID() uint64
 	setInstanceID(uint64)
 	newInstance()
 	AskForLearn(time.Duration)
@@ -51,10 +52,10 @@ type Learner interface {
 	getChecksum() uint32
 	onSendCheckpoint(*comm.CheckpointMsg)
 	onAckSendCheckpoint(*comm.CheckpointMsg)
-	SendCheckpointBegin(uint64, uint64, uint64, uint64)
-	SendCheckpointEnd(uint64, uint64, uint64, uint64)
+	sendCheckpointBegin(uint64, uint64, uint64, uint64) error
+	sendCheckpoint(uint64, uint64, uint64, uint64, uint32, string, uint32, int64, []byte) error
+	sendCheckpointEnd(uint64, uint64, uint64, uint64) error
 	sendValue(uint64, uint64, ballot, []byte, uint32, bool)
-	getInstanceID() uint64
 	getValue() []byte
 	getLastSeenInstanceID() uint64
 }
@@ -63,7 +64,6 @@ type learner struct {
 	state              learnerState
 	acceptor           Acceptor
 	learning           bool
-	nodeID             uint64
 	instanceID         uint64
 	lastAckInstanceID  uint64
 	lastSeenInstanceID uint64
@@ -71,22 +71,24 @@ type learner struct {
 	done               chan struct{}
 	stopped            <-chan struct{}
 	groupCfg           comm.GroupConfig
-	instance           comm.Instance
+	instance           Instance
 	cpm                checkpoint.CheckpointManager
-	cps                checkpoint.Sender
-	cpr                *checkpoint.Receiver
+	cps                Sender
+	cpr                checkpoint.Receiver
 	tp                 Transporter
-	sender
+	st store.Storage
+	sender sender
 }
 
-func newLearner(nodeID uint64, groupCfg comm.GroupConfig, instance comm.Instance, tp Transporter, st store.Storage, acceptor Acceptor, cpm checkpoint.CheckpointManager) Learner {
+func newLearner(groupCfg comm.GroupConfig, instance Instance, tp Transporter, st store.Storage,
+	acceptor Acceptor, cpm checkpoint.CheckpointManager) Learner {
 	learner := &learner{
-		nodeID:   nodeID,
 		acceptor: acceptor,
 		groupCfg:    groupCfg,
 		instance: instance,
 		cpm:      cpm,
 		tp:       tp,
+		st: st,
 		done:     make(chan struct{}),
 	}
 	learner.sender = sender{
@@ -94,7 +96,7 @@ func newLearner(nodeID uint64, groupCfg comm.GroupConfig, instance comm.Instance
 		st:      st,
 	}
 
-	learner.cpr = &checkpoint.Receiver{Storage: st}
+	learner.cpr = checkpoint.NewReceiver(st)
 	return learner
 }
 
@@ -117,6 +119,10 @@ func (l *learner) stop() {
 func (l *learner) newInstance() {
 	atomic.AddUint64(&l.instanceID, 1)
 	l.state.reset()
+}
+
+func (l *learner) getInstanceID() uint64 {
+	return l.instanceID
 }
 
 func (l *learner) setInstanceID(id uint64) {
@@ -142,9 +148,9 @@ func (l *learner) proposalFinished(instanceID, proposalID uint64) {
 	msg := &comm.PaxosMsg{
 		Type:       comm.PaxosMsgType_ProposalFinished.Enum(),
 		InstanceID: proto.Uint64(instanceID),
-		NodeID:     proto.Uint64(l.nodeID),
+		NodeID:     proto.Uint64(l.instance.getNodeID()),
 		ProposalID: proto.Uint64(proposalID),
-		Checksum:   proto.Uint32(l.instance.GetChecksum()),
+		Checksum:   proto.Uint32(l.instance.getChecksum()),
 	}
 
 	l.instance.ReceivePaxosMessage(msg)
@@ -172,11 +178,11 @@ func (l *learner) broadcastToFollowers() {
 	msg := &comm.PaxosMsg{
 		Type:           comm.PaxosMsgType_SendValue.Enum(),
 		InstanceID:     proto.Uint64(l.instanceID),
-		NodeID:         proto.Uint64(l.nodeID),
+		NodeID:         proto.Uint64(l.instance.getNodeID()),
 		ProposalNodeID: proto.Uint64(l.acceptor.getAcceptorState().acceptedBallot.nodeID),
 		ProposalID:     proto.Uint64(l.acceptor.getAcceptorState().acceptedBallot.proposalID),
 		Value:          l.acceptor.getAcceptorState().acceptedValue,
-		Checksum:       proto.Uint32(l.instance.GetChecksum()),
+		Checksum:       proto.Uint32(l.instance.getChecksum()),
 	}
 
 	l.tp.broadcastToFollowers(comm.MsgType_Paxos, msg)
@@ -186,7 +192,7 @@ func (l *learner) sendValue(nodeID, instanceID uint64, b ballot, value []byte, c
 	msg := &comm.PaxosMsg{
 		Type:           comm.PaxosMsgType_SendValue.Enum(),
 		InstanceID:     proto.Uint64(instanceID),
-		NodeID:         proto.Uint64(l.nodeID),
+		NodeID:         proto.Uint64(l.instance.getNodeID()),
 		ProposalID:     proto.Uint64(b.proposalID),
 		ProposalNodeID: proto.Uint64(b.nodeID),
 		Value:          value,
@@ -222,7 +228,7 @@ func (l *learner) ackSendValue(nodeID uint64) {
 	msg := &comm.PaxosMsg{
 		Type:       comm.PaxosMsgType_AckSendValue.Enum(),
 		InstanceID: proto.Uint64(l.instanceID),
-		NodeID:     proto.Uint64(l.nodeID),
+		NodeID:     proto.Uint64(l.instance.getNodeID()),
 	}
 	l.tp.send(nodeID, comm.MsgType_Paxos, msg)
 }
@@ -254,10 +260,9 @@ func (l *learner) askForLearn() {
 	l.cpm.ExitAskForCheckpoint()
 	msg := &comm.PaxosMsg{
 		Type:       comm.PaxosMsgType_AskForLearn.Enum(),
-		NodeID:     proto.Uint64(l.nodeID),
+		NodeID:     proto.Uint64(l.instance.getNodeID()),
 		InstanceID: proto.Uint64(l.instanceID),
 	}
-	// todo: check if in follower mode
 	if l.groupCfg.FollowerMode() {
 		msg.ProposalNodeID = proto.Uint64(l.groupCfg.GetFollowNodeID())
 	}
@@ -267,8 +272,7 @@ func (l *learner) askForLearn() {
 
 func (l *learner) onAskForLearn(msg *comm.PaxosMsg) {
 	l.setLastSeenInstanceID(msg.GetInstanceID(), msg.GetNodeID())
-	if msg.GetProposalNodeID() == l.nodeID {
-		// todo: add follower node
+	if msg.GetProposalNodeID() == l.instance.getNodeID() {
 		l.groupCfg.AddFollower(msg.GetNodeID())
 	}
 	if msg.GetInstanceID() >= l.instanceID {
@@ -300,7 +304,7 @@ func (l *learner) confirmAskForLearn(nodeID uint64) {
 	msg := &comm.PaxosMsg{
 		Type:       comm.PaxosMsgType_ConfirmAskForLearn.Enum(),
 		InstanceID: proto.Uint64(l.instanceID),
-		NodeID:     proto.Uint64(l.nodeID),
+		NodeID:     proto.Uint64(l.instance.getNodeID()),
 	}
 	l.tp.send(nodeID, comm.MsgType_Paxos, msg)
 	l.learning = true
@@ -316,14 +320,20 @@ func (l *learner) sendInstanceID(instanceID, nodeID uint64) {
 	msg := &comm.PaxosMsg{
 		Type:                comm.PaxosMsgType_SendInstanceID.Enum(),
 		InstanceID:          proto.Uint64(instanceID),
-		NodeID:              proto.Uint64(l.nodeID),
+		NodeID:              proto.Uint64(l.instance.getNodeID()),
 		CurInstanceID:       proto.Uint64(l.instanceID),
 		MinChosenInstanceID: proto.Uint64(l.cpm.GetMinChosenInstanceID()),
 	}
 	if l.instanceID-instanceID > 50 {
-		// todo: add systemvar mastervar bytes
-		msg.SystemVariables = nil
-		msg.MasterVariables = nil
+		cp, err := l.groupCfg.GetSystemCheckpoint()
+		if err == nil {
+			msg.SystemVariables = cp
+
+		}
+		cp, err = l.groupCfg.GetMasterCheckpoint()
+		if err == nil {
+			msg.MasterVariables = cp
+		}
 	}
 	l.tp.send(nodeID, comm.MsgType_Paxos, msg)
 }
@@ -331,7 +341,12 @@ func (l *learner) sendInstanceID(instanceID, nodeID uint64) {
 func (l *learner) onSendInstanceID(msg *comm.PaxosMsg) {
 	l.setLastSeenInstanceID(msg.GetCurInstanceID(), msg.GetNodeID())
 
-	// todo: check systemvar and mastervar
+	if len(msg.GetSystemVariables()) > 0 {
+		l.groupCfg.UpdateSystemByCheckpoint(msg.GetSystemVariables())
+	}
+	if len(msg.GetMasterVariables()) > 0 {
+		l.groupCfg.UpdateMasterByCheckpoint(msg.GetMasterVariables())
+	}
 
 	if msg.GetInstanceID() != l.instanceID {
 		return
@@ -365,7 +380,7 @@ func (l *learner) askForCheckpoint(nodeID uint64) {
 	}
 	msg := &comm.PaxosMsg{
 		Type:       comm.PaxosMsgType_AskForCheckpoint.Enum(),
-		NodeID:     proto.Uint64(l.nodeID),
+		NodeID:     proto.Uint64(l.instance.getNodeID()),
 		InstanceID: proto.Uint64(l.instanceID),
 	}
 	l.tp.send(nodeID, comm.MsgType_Paxos, msg)
@@ -373,7 +388,7 @@ func (l *learner) askForCheckpoint(nodeID uint64) {
 
 func (l *learner) onAskForCheckpoint(msg *comm.PaxosMsg) {
 	if l.cps == nil {
-		l.cps = checkpoint.NewSender(l, l.cpm)
+		l.cps = newCheckpointSender(l, l.instance, l.cpm)
 		l.cps.Start()
 	} else if l.cps.IsFinished() {
 		l.cps.Start()
@@ -383,35 +398,36 @@ func (l *learner) onAskForCheckpoint(msg *comm.PaxosMsg) {
 	}
 }
 
-func (l *learner) SendCheckpointBegin(nodeID, uuid, sequence, checkpointInstanceID uint64) {
+func (l *learner) sendCheckpointBegin(nodeID, uuid, sequence, checkpointInstanceID uint64) error {
 	msg := &comm.CheckpointMsg{
 		Type:                 comm.CheckpointMsgType_SendFile.Enum(),
-		NodeID:               proto.Uint64(l.nodeID),
+		NodeID:               proto.Uint64(l.instance.getNodeID()),
 		Flag:                 comm.CheckPointMsgFlag_Begin.Enum(),
 		UUID:                 proto.Uint64(uuid),
 		Sequence:             proto.Uint64(sequence),
 		CheckpointInstanceID: proto.Uint64(checkpointInstanceID),
 	}
 	l.tp.send(nodeID, comm.MsgType_Checkpoint, msg)
+	return nil
 }
 
-func (l *learner) SendCheckpointEnd(nodeID, uuid, sequence, checkpointInstanceID uint64) {
+func (l *learner) sendCheckpointEnd(nodeID, uuid, sequence, checkpointInstanceID uint64) error {
 	msg := &comm.CheckpointMsg{
 		Type:                 comm.CheckpointMsgType_SendFile.Enum(),
-		NodeID:               proto.Uint64(l.nodeID),
+		NodeID:               proto.Uint64(l.instance.getNodeID()),
 		Flag:                 comm.CheckPointMsgFlag_End.Enum(),
 		UUID:                 proto.Uint64(uuid),
 		Sequence:             proto.Uint64(sequence),
 		CheckpointInstanceID: proto.Uint64(checkpointInstanceID),
 	}
-	l.tp.send(nodeID, comm.MsgType_Checkpoint, msg)
+	return l.tp.send(nodeID, comm.MsgType_Checkpoint, msg)
 }
 
 func (l *learner) sendCheckpoint(nodeID, uuid, sequence, checkpointInstanceID uint64,
-	checksum uint32, path string, smid uint32, offset int64, b []byte) {
+	checksum uint32, path string, smid uint32, offset int64, b []byte) error {
 	msg := &comm.CheckpointMsg{
 		Type:                 comm.CheckpointMsgType_SendFile.Enum(),
-		NodeID:               proto.Uint64(l.nodeID),
+		NodeID:               proto.Uint64(l.instance.getNodeID()),
 		Flag:                 comm.CheckPointMsgFlag_Progressing.Enum(),
 		UUID:                 proto.Uint64(uuid),
 		Sequence:             proto.Uint64(sequence),
@@ -422,7 +438,7 @@ func (l *learner) sendCheckpoint(nodeID, uuid, sequence, checkpointInstanceID ui
 		Offset:               proto.Int64(offset),
 		Buffer:               b,
 	}
-	l.tp.send(nodeID, comm.MsgType_Checkpoint, msg)
+	return l.tp.send(nodeID, comm.MsgType_Checkpoint, msg)
 }
 
 func (l *learner) onSendCheckpointBegin(msg *comm.CheckpointMsg) error {
@@ -468,7 +484,7 @@ func (l *learner) onSendCheckpoint(msg *comm.CheckpointMsg) {
 func (l *learner) ackSendCheckpoint(nodeID, uuid, sequence uint64, flag comm.CheckPointMsgFlag) {
 	msg := &comm.CheckpointMsg{
 		Type:     comm.CheckpointMsgType_AckSendFile.Enum(),
-		NodeID:   proto.Uint64(l.nodeID),
+		NodeID:   proto.Uint64(l.instance.getNodeID()),
 		UUID:     proto.Uint64(uuid),
 		Sequence: proto.Uint64(sequence),
 		Flag:     flag.Enum(),
