@@ -52,7 +52,7 @@ func (*comparator) Successor(dst, b []byte) []byte {
 	return nil
 }
 
-func newGroupLevelDB(cfg *StorageConfig) (ldbs ldbs, err error) {
+func newLevelDBGroup(cfg *StorageConfig) (ldbs ldbs, err error) {
 	ldbs = make([]*levelDB, cfg.GroupCount)
 	if len(ldbs) == 0 || ldbs == nil {
 		return nil, errors.New("invalid group count")

@@ -65,7 +65,7 @@ func (*comparator) Name() string {
 	return "paxos.comparator"
 }
 
-func newGroupRocksDB(cfg *StorageConfig) (rdbs rdbs, err error) {
+func newRocksDBGroup(cfg *StorageConfig) (rdbs rdbs, err error) {
 	rdbs = make([]*rocksDB, cfg.GroupCount)
 	if len(rdbs) == 0 || rdbs == nil {
 		return nil, errors.New("invalid group count")
