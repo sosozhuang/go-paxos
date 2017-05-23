@@ -83,7 +83,7 @@ func (t *transporter) pack(msgType comm.MsgType, pb proto.Message) ([]byte, erro
 	}
 	b = append(b, l...)
 	b = append(b, m...)
-	checksum := crc32.Update(0, crcTable, b)
+	checksum := crc32.Checksum(b, crcTable)
 	l, err = comm.ObjectToBytes(checksum)
 	if err != nil {
 		return nil, err
