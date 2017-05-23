@@ -10,6 +10,9 @@ var (
 )
 
 func setToken(t string) {
+	if t == "" {
+		return
+	}
 	token = t
 	tokenLen = len(token)
 }
