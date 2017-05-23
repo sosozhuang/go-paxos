@@ -22,12 +22,12 @@ import (
 	"github.com/sosozhuang/paxos/logger"
 	"github.com/sosozhuang/paxos/network"
 	"github.com/sosozhuang/paxos/store"
+	"math"
 	"math/rand"
 	"net"
 	"strings"
 	"sync"
 	"time"
-	"math"
 )
 
 const (
@@ -35,7 +35,7 @@ const (
 )
 
 var (
-	log           = logger.PaxosLogger
+	log              = logger.PaxosLogger
 	proposeTimeout   = time.Minute
 	errGroupOutRange = errors.New("group out of range")
 )
@@ -81,6 +81,10 @@ func (cfg *NodeConfig) validate() error {
 		return fmt.Errorf("group count %d too large", cfg.GroupCount)
 	}
 
+	if cfg.FollowerMode && cfg.FollowNodeID == comm.UnknownNodeID {
+		return errors.New("Node in follower mode but has no follow a node")
+	}
+
 	var ip string
 	if cfg.AdvertiseIP != "" {
 		ip = cfg.AdvertiseIP
@@ -100,7 +104,7 @@ func (cfg *NodeConfig) validate() error {
 
 	peers := strings.Split(cfg.Peers, ",")
 	cfg.peersMap = make(map[uint64]net.Addr, len(peers))
-	cfg.members = make(map[uint64]string, len(peers) + 1)
+	cfg.members = make(map[uint64]string, len(peers)+1)
 	cfg.members[cfg.id] = cfg.listenAddr
 	for _, peer := range peers {
 		addr, err := network.ResolveAddr(cfg.network, peer)
@@ -118,8 +122,6 @@ func (cfg *NodeConfig) validate() error {
 		return errors.New("listen addr should not in peers")
 	}
 
-
-
 	return nil
 }
 
@@ -135,7 +137,7 @@ type node struct {
 	masters []election.Master
 	groups  []comm.Group
 	//batches []Batch
-	sms     [][]comm.StateMachine
+	sms [][]comm.StateMachine
 }
 
 func NewNode(cfg NodeConfig) (n *node, err error) {
@@ -199,8 +201,8 @@ func NewNode(cfg NodeConfig) (n *node, err error) {
 		n.masters = make([]election.Master, n.cfg.GroupCount)
 		for i := uint16(0); i < uint16(n.cfg.GroupCount); i++ {
 			masterCfg := election.MasterConfig{
-				NodeID: n.cfg.id,
-				GroupID: i,
+				NodeID:       n.cfg.id,
+				GroupID:      i,
 				LeaseTimeout: n.cfg.LeaseTimeout,
 			}
 			if n.masters[i], err = election.NewMaster(masterCfg, n, n.storage.GetStorage(i)); err != nil {
@@ -213,12 +215,13 @@ func NewNode(cfg NodeConfig) (n *node, err error) {
 	n.groups = make([]comm.Group, n.cfg.GroupCount)
 	for i := uint16(0); i < uint16(n.cfg.GroupCount); i++ {
 		groupCfg := groupConfig{
-			nodeID: n.cfg.id,
-			groupID: i,
-			followerMode: false,
-			followNodeID: comm.UnknownNodeID,
+			nodeID:           n.cfg.id,
+			groupID:          i,
+			followerMode:     false,
+			followNodeID:     comm.UnknownNodeID,
 			enableMemberShip: n.cfg.EnableMemberShip,
-			masterSM: n.masters[i].GetStateMachine(),
+			sms:              n.sms[i],
+			masterSM:         n.masters[i].GetStateMachine(),
 		}
 		if n.groups[i], err = newGroup(groupCfg, n.network, n.storage.GetStorage(i)); err != nil {
 			log.Error(err)
@@ -238,6 +241,7 @@ func (n *node) Start() (err error) {
 			n.stop()
 		}
 	}()
+
 	n.wg.Add(1)
 	go func() {
 		defer n.wg.Done()
@@ -245,19 +249,25 @@ func (n *node) Start() (err error) {
 			n.errChan <- err
 		}
 	}()
-	n.wg.Add(1)
-	go func() {
-		defer n.wg.Done()
-		if err := n.network.Start(ctx, n.NotifyStop()); err != nil {
-			n.errChan <- err
-		}
-	}()
+
+	if n.cfg.EnableMaster && !n.cfg.FollowerMode {
+		n.wg.Add(1)
+		go func() {
+			defer n.wg.Done()
+			for _, master := range n.masters {
+				if err := master.Start(ctx, n.NotifyStop()); err != nil {
+					n.errChan <- err
+					break
+				}
+			}
+		}()
+	}
 
 	n.wg.Add(1)
 	go func() {
 		defer n.wg.Done()
-		for _, master := range n.masters {
-			if err := master.Start(ctx, n.NotifyStop()); err != nil {
+		for _, group := range n.groups {
+			if err := group.Start(ctx, n.NotifyStop()); err != nil {
 				n.errChan <- err
 				break
 			}
@@ -280,6 +290,9 @@ func (n *node) Start() (err error) {
 
 func (n *node) Serve() error {
 	defer n.stop()
+	if err := n.network.Start(n.NotifyStop()); err != nil {
+		return err
+	}
 	log.Debug("node ready")
 	select {
 	case <-n.stopped:
@@ -291,23 +304,20 @@ func (n *node) Serve() error {
 }
 
 func (n *node) stop() {
-	if n.storage != nil {
-		n.storage.Close()
+	for _, master := range n.masters {
+		master.Stop()
 	}
 	if n.network != nil {
 		n.network.Stop()
 	}
-	for _, master := range n.masters {
-		master.Stop()
-	}
 	for _, group := range n.groups {
 		group.Stop()
 	}
+	if n.storage != nil {
+		n.storage.Close()
+	}
 	//for _, batch := range n.batches {
 	//	batch
-	//}
-	//for _, sm := range n.sms {
-	//	sm
 	//}
 	close(n.done)
 }
@@ -322,18 +332,6 @@ func (n *node) NotifyStop() <-chan struct{} {
 }
 func (n *node) NotifyError(err error) {
 	n.errChan <- err
-}
-
-func (n *node) initStateMachine() error {
-	for i, group := range n.groups {
-		group.AddStateMachine(n.sms[i]...)
-	}
-	if n.cfg.EnableMaster && !n.cfg.FollowerMode {
-		for _, master := range n.masters {
-			master.Start(context.Background(), n.stopped)
-		}
-	}
-	return nil
 }
 
 func (n *node) checkGroupID(groupID uint16) bool {
