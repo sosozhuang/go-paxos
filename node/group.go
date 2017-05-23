@@ -9,14 +9,16 @@ import (
 	"github.com/sosozhuang/paxos/paxos"
 	"github.com/sosozhuang/paxos/store"
 	"hash/crc32"
+	"math/rand"
 	"sync"
 	"time"
-	"math/rand"
+	"fmt"
 )
 
 const (
 	maxValueLength = 10 * 1024 * 1024
 	learnTimeout   = time.Minute
+	followTimeout  = time.Second * 10
 )
 
 var crcTable = crc32.MakeTable(crc32.Castagnoli)
@@ -29,20 +31,22 @@ type groupConfig struct {
 	followNodeID     uint64
 	enableMemberShip bool
 	enableReplayer   bool
-	masterSM comm.StateMachine
-	systemSM   *systemStateMachine
-	lmu        sync.Mutex
-	learnNodes map[uint64]time.Time
-	fmu        sync.Mutex
-	followers  map[uint64]time.Time
+	sms              []comm.StateMachine
+	masterSM         comm.StateMachine
+	systemSM         *systemStateMachine
+	lmu              sync.Mutex
+	learnNodes       map[uint64]time.Time
+	fmu              sync.Mutex
+	followers        map[uint64]time.Time
 }
 
 func (cfg *groupConfig) validate(st store.Storage) error {
-	if len(cfg.members) == 0 {
-		return errors.New("")
+	if len(cfg.members) <= 0 {
+		return fmt.Errorf("group %d member list is empty", cfg.groupID)
 	}
-	if cfg.followerMode && cfg.followNodeID == comm.UnknownNodeID {
-		return errors.New("")
+
+	if len(cfg.sms) <= 0 {
+		return fmt.Errorf("group %d state machine list is empty", cfg.groupID)
 	}
 	var err error
 	cfg.systemSM, err = newSystemStateMachine(cfg.nodeID, st)
@@ -51,6 +55,8 @@ func (cfg *groupConfig) validate(st store.Storage) error {
 	}
 	cfg.systemSM.addNodes(cfg.members)
 
+	cfg.learnNodes = make(map[uint64]time.Time)
+	cfg.followers = make(map[uint64]time.Time)
 	return nil
 }
 
@@ -127,7 +133,7 @@ func (cfg *groupConfig) GetLearnNodes() map[uint64]string {
 
 func (cfg *groupConfig) AddFollower(nodeID uint64) {
 	cfg.fmu.Lock()
-	cfg.followers[nodeID] = time.Now().Add(time.Second * 10)
+	cfg.followers[nodeID] = time.Now().Add(followTimeout)
 	cfg.fmu.Unlock()
 }
 
@@ -167,13 +173,8 @@ func (cfg *groupConfig) UpdateMasterByCheckpoint(b []byte) error {
 }
 
 type group struct {
-	cfg      *groupConfig
-	instance comm.Instance
-	//systemSM   *systemStateMachine
-	//lmu        sync.Mutex
-	//learnNodes map[uint64]time.Time
-	//fmu        sync.Mutex
-	//followers  map[uint64]time.Time
+	cfg       *groupConfig
+	instance  comm.Instance
 	proposeCh chan context.Context
 	msgCh     chan []byte
 	wg        sync.WaitGroup
@@ -189,17 +190,8 @@ func newGroup(cfg groupConfig, sender comm.Sender, st store.Storage) (comm.Group
 		cfg:       &cfg,
 		proposeCh: make(chan context.Context, 100),
 		msgCh:     make(chan []byte, 100),
-		//learnNodes:  make(map[uint64]time.Time),
-		//followers: make(map[uint64]time.Time),
 	}
 
-	//group.systemSM, err = newSystemStateMachine(nodeID, st)
-	//if err != nil {
-	//	return nil, err
-	//}
-	//group.systemSM.AddNodes(cfg.members)
-
-	//tp := paxos.NewTransporter(cfg.nodeID, group.cfg, sender)
 	group.instance, err = paxos.NewInstance(group.cfg, sender, st)
 	if err != nil {
 		return nil, err
@@ -209,10 +201,16 @@ func newGroup(cfg groupConfig, sender comm.Sender, st store.Storage) (comm.Group
 }
 
 func (g *group) Start(ctx context.Context, stopped <-chan struct{}) error {
-	g.AddStateMachine(g.cfg.masterSM, g.cfg.systemSM)
-	go g.handleNewValue(stopped)
-	go g.handleMessage(stopped)
-	return g.instance.Start(ctx, stopped)
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	default:
+		g.addStateMachine(g.cfg.masterSM, g.cfg.systemSM)
+		g.addStateMachine(g.cfg.sms...)
+		go g.handleNewValue(stopped)
+		go g.handleMessage(stopped)
+		return g.instance.Start(ctx, stopped)
+	}
 }
 
 func (g *group) Stop() {
@@ -306,7 +304,7 @@ func (g *group) newSystemValue() {
 		log.Error(err)
 		return
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
+	ctx, cancel := context.WithTimeout(context.Background(), proposeTimeout)
 	defer cancel()
 	ctx = context.WithValue(ctx, "value", append(b, value...))
 	result := make(chan comm.Result)
@@ -315,7 +313,7 @@ func (g *group) newSystemValue() {
 	g.instance.NewValue(ctx)
 }
 
-func (g *group) AddStateMachine(sms ...comm.StateMachine) {
+func (g *group) addStateMachine(sms ...comm.StateMachine) {
 	g.instance.AddStateMachine(sms...)
 }
 
@@ -392,7 +390,7 @@ func (g *group) unpack(b []byte) (*comm.Header, error) {
 		return nil, err
 	}
 
-	if checksum != crc32.Update(0, crcTable, b[:offset]) {
+	if checksum != crc32.Checksum(b[:offset], crcTable) {
 		return nil, errors.New("checksum error")
 	}
 	return header, nil
