@@ -16,12 +16,13 @@ package logger
 import (
 	"fmt"
 	"github.com/Sirupsen/logrus"
-	"os"
-	"time"
-	"sync"
+	"github.com/sosozhuang/paxos/util"
 	"io/ioutil"
 	"log"
-	"github.com/sosozhuang/paxos/util"
+	"os"
+	"sync"
+	"time"
+	"path"
 )
 
 const (
@@ -48,13 +49,12 @@ type Logger interface {
 	Panicf(format string, v ...interface{})
 }
 
-
 var (
 	ProposerLogger Logger
 	AcceptorLogger Logger
 	LearnerLogger  Logger
-	PaxosLogger  Logger
-	once sync.Once
+	PaxosLogger    Logger
+	once           sync.Once
 )
 
 func NewLogger(output, logDir, level string) (Logger, error) {
@@ -75,7 +75,7 @@ func newLogrusLogger(output, logDir, level string) (*logrus.Logger, error) {
 		if out, err := touchLogOutput(output, logDir, true); err != nil {
 			return nil, err
 		} else {
-			util.AddHook(func() {out.Close()})
+			util.AddHook(func() { out.Close() })
 			l.Out = out
 		}
 	}
@@ -144,7 +144,8 @@ func touchLogOutput(output, logDir string, append bool) (*os.File, error) {
 		}
 	}
 	var f *os.File
-	info, err := os.Stat(logDir + string(os.PathSeparator) + output)
+	file := path.Join(logDir, output)
+	info, err := os.Stat(file)
 	if err == nil {
 		if info.IsDir() {
 			//name = name + string(os.PathSeparator) + "component.log"
@@ -156,10 +157,10 @@ func touchLogOutput(output, logDir string, append bool) (*os.File, error) {
 			} else {
 				flag = os.O_RDWR | os.O_TRUNC
 			}
-			f, err = os.OpenFile(output, flag, 0)
+			f, err = os.OpenFile(file, flag, 0)
 		}
 	} else if os.IsNotExist(err) {
-		f, err = os.Create(output)
+		f, err = os.Create(file)
 	}
 	return f, err
 }
@@ -176,10 +177,7 @@ func newDefaultLogger(output, logDir, prefix, level string) (Logger, error) {
 		if out, err := touchLogOutput(output, logDir, true); err != nil {
 			return nil, err
 		} else {
-			//todo: close log output
-			//func () {
-			//	out.Close()
-			//}
+			util.AddHook(func() {out.Close()})
 			l.Logger = log.New(out, prefix, log.LstdFlags)
 		}
 	}
