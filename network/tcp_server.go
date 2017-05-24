@@ -103,7 +103,6 @@ type tcpServerConn struct {
 	conn    net.Conn
 	timeout time.Duration
 	ch      chan<- []byte
-	comm.Node
 	closeFunc
 }
 
