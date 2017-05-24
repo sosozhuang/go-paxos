@@ -1,7 +1,6 @@
 package network
 
 import (
-	"context"
 	"fmt"
 	"github.com/sosozhuang/paxos/comm"
 	"github.com/sosozhuang/paxos/logger"
@@ -81,7 +80,7 @@ func Uint64ToAddr(i uint64) string {
 	return fmt.Sprintf("%v.%v.%v.%v:%d", b[3], b[2], b[1], b[0], p)
 }
 
-func (cfg *NetWorkConfig) Validate() error {
+func (cfg *NetWorkConfig) validate() error {
 	switch cfg.NetWork {
 	case "tcp":
 	default:
@@ -96,7 +95,7 @@ func (cfg *NetWorkConfig) Validate() error {
 }
 
 func NewPeerNetWork(cfg NetWorkConfig, receiver comm.Receiver) (comm.NetWork, error) {
-	if err := cfg.Validate(); err != nil {
+	if err := cfg.validate(); err != nil {
 		return nil, err
 	}
 	network := &tcpPeerNetWork{
@@ -120,7 +119,7 @@ type tcpPeerNetWork struct {
 	client *tcpPeerClient
 }
 
-func (t *tcpPeerNetWork) Start(ctx context.Context, stopped <-chan struct{}) error {
+func (t *tcpPeerNetWork) Start(stopped <-chan struct{}) error {
 	t.server.Start(stopped)
 	//go t.client.Start()
 	return nil
