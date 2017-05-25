@@ -14,7 +14,6 @@
 package store
 
 import (
-	"github.com/sosozhuang/paxos/logger"
 	"github.com/syndtr/goleveldb/leveldb"
 	"github.com/syndtr/goleveldb/leveldb/opt"
 	"errors"
@@ -29,8 +28,6 @@ import (
 	"sync"
 	"math/rand"
 )
-
-var log = logger.PaxosLogger
 
 type ldbs []*levelDB
 
@@ -76,16 +73,16 @@ func newLevelDBGroup(cfg *StorageConfig) (ldbs ldbs, err error) {
 }
 
 func (ls ldbs) Open(ctx context.Context, stopped <-chan struct{}) error {
-	ch := make(chan error)
+	ch := make(chan error, len(ls))
 	var wg sync.WaitGroup
 	wg.Add(len(ls))
 	for _, db := range ls {
-		go func() {
+		go func(db *levelDB) {
 			defer wg.Done()
-			if err := db.Open(ctx, stopped); err != nil {
+			if err := db.open(ctx, stopped); err != nil {
 				ch <- err
 			}
-		}()
+		}(db)
 	}
 	go func() {
 		wg.Wait()
@@ -108,7 +105,7 @@ func (ls ldbs) Open(ctx context.Context, stopped <-chan struct{}) error {
 func (ls ldbs) Close() {
 	for _, db := range ls {
 		if db != nil {
-			db.Close()
+			db.close()
 		}
 	}
 }
@@ -117,45 +114,11 @@ func (ls ldbs) GetStorage(id uint16) Storage {
 	return ls[id]
 }
 
-func (ls ldbs) Get(id uint16, instanceID uint64) ([]byte, error) {
-	return ls[id].Get(instanceID)
-}
-func (ls ldbs) Set(id uint16, instanceID uint64, value []byte) error {
-	return ls[id].Set(instanceID, value)
-}
-func (ls ldbs) Delete(id uint16, instanceID uint64) error {
-	return ls[id].Delete(instanceID)
-}
-func (ls ldbs) GetMaxInstanceID(id uint16) (uint64, error) {
-	return ls[id].GetMaxInstanceID()
-}
-func (ls ldbs) SetMinChosenInstanceID(id uint16, instanceID uint64) error {
-	return ls[id].SetMinChosenInstanceID(instanceID)
-}
-func (ls ldbs) GetMinChosenInstanceID(id uint16) (uint64, error) {
-	return ls[id].GetMinChosenInstanceID()
-}
-func (ls ldbs) ClearAllLog(id uint16) error {
-	return ls[id].Recreate()
-}
-func (ls ldbs) SetSystemVar(id uint16, v *comm.SystemVar) error {
-	return ls[id].SetSystemVar(v)
-}
-func (ls ldbs) GetSystemVar(id uint16) (*comm.SystemVar, error) {
-	return ls[id].GetSystemVar()
-}
-func (ls ldbs) SetMasterVar(id uint16, v *comm.MasterVar) error {
-	return ls[id].SetMasterVar(v)
-}
-func (ls ldbs) GetMasterVar(id uint16) (*comm.MasterVar, error) {
-	return ls[id].GetMasterVar()
-}
-
 func newLevelDB(cfg *StorageConfig, dir string, cpr comparer.Comparer) (ldb *levelDB, err error) {
 	ldb = new(levelDB)
 	defer func() {
 		if err != nil && ldb != nil {
-			ldb.Close()
+			ldb.close()
 			ldb = nil
 		}
 	}()
@@ -174,17 +137,17 @@ func newLevelDB(cfg *StorageConfig, dir string, cpr comparer.Comparer) (ldb *lev
 
 	ldb.ReadOptions = &opt.ReadOptions{}
 	ldb.WriteOptions = &opt.WriteOptions{}
-	ldb.WriteOptions.Sync = !cfg.DisableSync
+	ldb.WriteOptions.Sync = cfg.Sync
 	ldb.DisableWAL = cfg.DisableWAL
 
 	ldb.logStore, err = newLogStore(dir, ldb)
 	return
 }
 
-func (l *levelDB) Open(ctx context.Context, stopped <-chan struct{}) error {
+func (l *levelDB) open(ctx context.Context, stopped <-chan struct{}) error {
 	ch := make(chan error)
 	go func() {
-		if err := l.logStore.Open(ctx, stopped); err != nil {
+		if err := l.logStore.open(ctx, stopped); err != nil {
 			ch <- err
 		} else {
 			close(ch)
@@ -277,7 +240,7 @@ func (l *levelDB) ForceDelete(instanceID uint64) error {
 		return err
 	}
 
-	if err = l.logStore.delete(value); err != nil {
+	if err = l.logStore.truncate(value); err != nil {
 		return err
 	}
 
@@ -340,7 +303,7 @@ func (l *levelDB) Recreate() error {
 		return err
 	}
 
-	l.Close()
+	l.close()
 	l.DB, err = leveldb.OpenFile(l.dir, l.Options)
 	if err != nil {
 		return err
@@ -441,13 +404,13 @@ func (l *levelDB) RebuildOneIndex(instanceID uint64, value []byte) error {
 	return l.DB.Put(key, value, l.WriteOptions)
 }
 
-func (l *levelDB) Close() {
+func (l *levelDB) close() {
 	if l.DB != nil {
 		l.DB.Close()
 		l.DB = nil
 	}
 	if l.logStore != nil {
-		l.logStore.Close()
+		l.logStore.close()
 		l.logStore = nil
 	}
 }

@@ -26,6 +26,7 @@ import (
 	"os"
 	"math"
 	"math/rand"
+	"fmt"
 )
 
 type rdbs []*rocksDB
@@ -43,14 +44,13 @@ type rocksDB struct {
 type comparator struct{}
 
 func (*comparator) Compare(a, b []byte) int {
-	i, err := strconv.ParseUint(string(a), 10, 64)
-	if err != nil {
-		log.Fatalf("Convert %s to uint error: %s\n", string(a), err)
+	var i, j uint64
+	if err := comm.BytesToObject(a, &i); err != nil {
+		log.Errorf("Convert %v to uint error: %s\n", a, err)
 		return 0
 	}
-	j, err := strconv.ParseUint(string(b), 10, 64)
-	if err != nil {
-		log.Fatalf("Convert %s to uint error: %s\n", string(b), err)
+	if err := comm.BytesToObject(b, &j); err != nil {
+		log.Errorf("Convert %v to uint error: %s\n", b, err)
 		return 0
 	}
 	if i == j {
@@ -89,16 +89,16 @@ func newRocksDBGroup(cfg *StorageConfig) (rdbs rdbs, err error) {
 }
 
 func (rs rdbs) Open(ctx context.Context, stopped <-chan struct{}) error {
-	ch := make(chan error)
+	ch := make(chan error, len(rs))
 	var wg sync.WaitGroup
 	wg.Add(len(rs))
 	for _, db := range rs {
-		go func() {
+		go func(db *rocksDB) {
 			defer wg.Done()
-			if err := db.Open(ctx, stopped); err != nil {
+			if err := db.open(ctx, stopped); err != nil {
 				ch <- err
 			}
-		}()
+		}(db)
 	}
 	go func() {
 		wg.Wait()
@@ -121,7 +121,7 @@ func (rs rdbs) Open(ctx context.Context, stopped <-chan struct{}) error {
 func (rs rdbs) Close() {
 	for _, db := range rs {
 		if db != nil {
-			db.Close()
+			db.close()
 		}
 	}
 }
@@ -130,45 +130,11 @@ func (rs rdbs) GetStorage(id uint16) Storage {
 	return rs[id]
 }
 
-func (rs rdbs) Get(id uint16, instanceID uint64) ([]byte, error) {
-	return rs[id].Get(instanceID)
-}
-func (rs rdbs) Set(id uint16, instanceID uint64, value []byte) error {
-	return rs[id].Set(instanceID, value)
-}
-func (rs rdbs) Delete(id uint16, instanceID uint64) error {
-	return rs[id].Delete(instanceID)
-}
-func (rs rdbs) GetMaxInstanceID(id uint16) (uint64, error) {
-	return rs[id].GetMaxInstanceID()
-}
-func (rs rdbs) SetMinChosenInstanceID(id uint16, instanceID uint64) error {
-	return rs[id].SetMinChosenInstanceID(instanceID)
-}
-func (rs rdbs) GetMinChosenInstanceID(id uint16) (uint64, error) {
-	return rs[id].GetMinChosenInstanceID()
-}
-func (rs rdbs) ClearAllLog(id uint16) error {
-	return rs[id].Recreate()
-}
-func (rs rdbs) SetSystemVariables(id uint16, v *comm.SystemVar) error {
-	return rs[id].SetSystemVar(v)
-}
-func (rs rdbs) GetSystemVar(id uint16) (*comm.SystemVar, error) {
-	return rs[id].GetSystemVar()
-}
-func (rs rdbs) SetMasterVar(id uint16, v *comm.MasterVar) error {
-	return rs[id].SetMasterVar(v)
-}
-func (rs rdbs) GetMasterVar(id uint16) (*comm.MasterVar, error) {
-	return rs[id].GetMasterVar()
-}
-
 func newRocksDB(cfg *StorageConfig, dir string, comparator gorocksdb.Comparator) (rdb *rocksDB, err error) {
 	rdb = new(rocksDB)
 	defer func() {
 		if err != nil && rdb != nil {
-			rdb.Close()
+			rdb.close()
 			rdb = nil
 		}
 	}()
@@ -188,17 +154,17 @@ func newRocksDB(cfg *StorageConfig, dir string, comparator gorocksdb.Comparator)
 
 	rdb.ReadOptions = gorocksdb.NewDefaultReadOptions()
 	rdb.WriteOptions = gorocksdb.NewDefaultWriteOptions()
-	rdb.WriteOptions.SetSync(!cfg.DisableSync)
+	rdb.WriteOptions.SetSync(cfg.Sync)
 	rdb.WriteOptions.DisableWAL(cfg.DisableWAL)
 
 	rdb.logStore, err = newLogStore(dir, rdb)
 	return
 }
 
-func (r *rocksDB) Open(ctx context.Context, stopped <-chan struct{}) error {
+func (r *rocksDB) open(ctx context.Context, stopped <-chan struct{}) error {
 	ch := make(chan error)
 	go func() {
-		if err := r.logStore.Open(ctx, stopped); err != nil {
+		if err := r.logStore.open(ctx, stopped); err != nil {
 			ch <- err
 		} else {
 			close(ch)
@@ -295,7 +261,7 @@ func (r *rocksDB) ForceDelete(instanceID uint64) error {
 		return nil
 	}
 
-	if err = r.logStore.delete(value.Data()); err != nil {
+	if err = r.logStore.truncate(value.Data()); err != nil {
 		return err
 	}
 
@@ -410,6 +376,7 @@ func (r *rocksDB) GetSystemVar() (*comm.SystemVar, error) {
 	return v, nil
 }
 func (r *rocksDB) SetMasterVar(v *comm.MasterVar) error {
+	fmt.Printf("set master var %v\n", v)
 	value, err := proto.Marshal(v)
 	if err != nil {
 		return err
@@ -419,20 +386,23 @@ func (r *rocksDB) SetMasterVar(v *comm.MasterVar) error {
 func (r *rocksDB) GetMasterVar() (*comm.MasterVar, error) {
 	value, err := r.DB.Get(r.ReadOptions, masterVarKey)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("rocks db get master vars error: %s", err)
 	}
 	defer value.Free()
 	if value.Size() == 0 {
 		return nil, ErrNotFound
 	}
 	v := &comm.MasterVar{}
-	if err := proto.Unmarshal(value.Data(), v); err != nil {
-		return nil, err
+	d := value.Data()
+	fmt.Println(len(d))
+	fmt.Printf("%v\n", d)
+	if err := proto.Unmarshal(d, v); err != nil {
+		return nil, fmt.Errorf("rocks db unmarshal master vars error: %s", err)
 	}
 	return v, nil
 }
 
-func (r *rocksDB) Close() {
+func (r *rocksDB) close() {
 	if r.Options != nil {
 		r.Options.Destroy()
 		r.Options = nil
@@ -491,7 +461,7 @@ func (r *rocksDB) closeDB() {
 		r.DB = nil
 	}
 	if r.logStore != nil {
-		r.logStore.Close()
+		r.logStore.close()
 		r.logStore = nil
 	}
 }
