@@ -51,7 +51,7 @@ func (t *tcpPeerServer) accept(stopped <-chan struct{}) {
 	delay := time.Millisecond * 5
 	for {
 		select {
-		case <-t.stopped:
+		case <-stopped:
 			return
 		default:
 		}
