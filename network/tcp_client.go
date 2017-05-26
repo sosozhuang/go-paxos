@@ -14,7 +14,7 @@ type tcpPeerClient struct {
 	timeout      time.Duration
 	writeTimeout time.Duration
 	keepAlive    time.Duration
-	chTimeout time.Duration
+	chTimeout    time.Duration
 	cap          int
 }
 
@@ -25,7 +25,7 @@ func newTcpPeerClient(timeout, keepAlive, writeTimeout time.Duration, cap int) *
 		writeTimeout: writeTimeout,
 		keepAlive:    keepAlive,
 		chTimeout:    time.Second * 3,
-		cap: cap,
+		cap:          cap,
 	}
 }
 
@@ -42,21 +42,23 @@ func (t *tcpPeerClient) createClientConn(addr string) (*tcpClientConn, error) {
 	}
 	conn.closeFunc = func(net.Conn) {
 		t.mu.Lock()
-		defer t.mu.Unlock()
-		defer t.wg.Done()
+		defer func() {
+			t.mu.Unlock()
+			t.wg.Done()
+		}()
 		delete(t.conns, addr)
 	}
 	t.conns[addr] = conn
 	return conn, nil
 }
 
-func (t *tcpPeerClient) sendMessage(addr string, msg []byte) error {
+func (t *tcpPeerClient) sendMessage(addr string, msg []byte) (err error) {
 	conn, ok := t.getClientConn(addr)
 	if !ok {
-		conn, err := t.createClientConn(addr)
+		conn, err = t.createClientConn(addr)
 		if err != nil {
 			log.Error(err)
-			return err
+			return
 		}
 		t.wg.Add(1)
 		go conn.handleWrite()
