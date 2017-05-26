@@ -6,6 +6,7 @@ import (
 	"net"
 	"sync"
 	"time"
+	"fmt"
 )
 
 type tcpPeerServer struct {
@@ -17,17 +18,16 @@ type tcpPeerServer struct {
 	listener *net.TCPListener
 	wg       sync.WaitGroup
 	ch       chan []byte
-	stopped  <-chan struct{}
 }
 
 func newTcpPeerServer(receiver comm.Receiver, addr string, timeout, readTimeout time.Duration, cap int) (*tcpPeerServer, error) {
 	tcpAddr, err := net.ResolveTCPAddr("tcp", addr)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("tcp peer server resolver address error: %s", err)
 	}
 	ln, err := net.ListenTCP("tcp", tcpAddr)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("tcp peer server listen address error: %s", err)
 	}
 	return &tcpPeerServer{
 		//addr: addr,
@@ -40,12 +40,11 @@ func newTcpPeerServer(receiver comm.Receiver, addr string, timeout, readTimeout 
 }
 
 func (t *tcpPeerServer) Start(stopped <-chan struct{}) {
-	t.stopped = stopped
 	go t.handleMessage()
-	go t.accept()
+	go t.accept(stopped)
 }
 
-func (t *tcpPeerServer) accept() {
+func (t *tcpPeerServer) accept(stopped <-chan struct{}) {
 	t.wg.Add(1)
 	defer t.stop()
 	f := func(net.Conn) { t.wg.Done() }
@@ -73,7 +72,7 @@ func (t *tcpPeerServer) accept() {
 		t.wg.Add(1)
 		sc := newTcpServerConn(conn, t.readTimeout, t.ch, f)
 		//go sc.receiveMessage()
-		go sc.handleRead(t.stopped)
+		go sc.handleRead(stopped)
 		delay = time.Millisecond * 5
 	}
 }
@@ -91,12 +90,12 @@ func (t *tcpPeerServer) stop() {
 		}
 		t.listener = nil
 	}
-	close(t.ch)
 	t.wg.Done()
 }
 
 func (t *tcpPeerServer) Stop() {
 	t.wg.Wait()
+	close(t.ch)
 }
 
 type tcpServerConn struct {
