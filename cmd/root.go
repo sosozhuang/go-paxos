@@ -96,6 +96,7 @@ func init() {
 	cobra.OnInitialize(initConfig)
 
 	flags := RootCmd.Flags()
+	flags.SortFlags = false
 	flags.StringVar(&cfgFile, "config", comm.DefaultConfigFile, "config file (default is $pwd/.paxos.yaml)")
 	flags.String("name", comm.DefaultName, "readable name for this member")
 	flags.Int("group-count", comm.DefaultGroupCount, "number of group")
