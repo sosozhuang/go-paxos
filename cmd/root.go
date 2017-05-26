@@ -46,6 +46,7 @@ to quickly create a Cobra application.`,
 			FollowerMode: viper.GetBool("follower-mode"),
 			FollowNode: viper.GetString("follow-node"),
 			ProposeTimeout: viper.GetDuration("propose-timeout") * time.Millisecond,
+			MaxLogCount: viper.GetInt64("max-log-count"),
 
 			DataDir: viper.GetString("data-dir"),
 			StorageType: viper.GetString("storage"),
@@ -110,6 +111,7 @@ func init() {
 	flags.Int("sync-period", comm.DefaultSyncPeriod, "time (in milliseconds) of committed transactions to trigger sync")
 	flags.Int("sync-count", comm.DefaultSyncCount, "number of committed transactions to trigger sync")
 	flags.Bool("disable-wal", comm.DefaultDisableWAL, "disable write ahead log")
+	flags.Int64("max-log-count", comm.DefaultLogCount, "number of logs to retain")
 
 	flags.String("token", comm.DefaultToken, "token of peers' traffic")
 	flags.String("listen-mode", comm.DefaultListenMode, "network listen mode ('tcp' or 'udp')")

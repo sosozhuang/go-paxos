@@ -30,30 +30,31 @@ type Config struct {
 	ProposeTimeout   time.Duration
 
 	//storage
-	DataDir     string
-	StorageType string
-	Sync        bool
-	SyncPeriod  time.Duration
-	SyncCount   int
-	DisableWAL  bool
+	DataDir          string
+	StorageType      string
+	Sync             bool
+	SyncPeriod       time.Duration
+	SyncCount        int
+	DisableWAL       bool
+	MaxLogCount      int64
 
 	//network
-	Token         string
-	ListenMode    string
-	AdvertiseIP   string
-	ListenIP      string
-	ListenPort    int
-	ListenTimeout time.Duration
-	DialTimeout   time.Duration
-	WriteTimeout  time.Duration
-	ReadTimeout   time.Duration
-	KeepAlive     time.Duration
-	ServerChanCap int
-	ClientChanCap int
+	Token            string
+	ListenMode       string
+	AdvertiseIP      string
+	ListenIP         string
+	ListenPort       int
+	ListenTimeout    time.Duration
+	DialTimeout      time.Duration
+	WriteTimeout     time.Duration
+	ReadTimeout      time.Duration
+	KeepAlive        time.Duration
+	ServerChanCap    int
+	ClientChanCap    int
 
 	//election
-	EnableElection  bool
-	ElectionTimeout time.Duration
+	EnableElection   bool
+	ElectionTimeout  time.Duration
 
 	//log
 	LogDir    string
@@ -79,6 +80,7 @@ func (cfg Config) String() string {
 	fmt.Fprintf(x, "sync period: %v\n", cfg.SyncPeriod)
 	fmt.Fprintf(x, "sync count: %d\n", cfg.SyncCount)
 	fmt.Fprintf(x, "disable wal: %v\n", cfg.DisableWAL)
+	fmt.Fprintf(x, "max log count: %d\n", cfg.MaxLogCount)
 
 	fmt.Fprintln(x, "[network config]")
 	fmt.Fprintf(x, "token: %s\n", cfg.Token)
@@ -115,6 +117,7 @@ const (
 	DefaultFollowerMode   = false
 	DefaultFollowNode     = ""
 	DefaultProposeTimeout = 60 * 1000
+	DefaultLogCount       = 10000
 
 	//storage
 	DefaultDataDir    = ""
