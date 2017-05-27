@@ -20,6 +20,7 @@ import (
 	"github.com/sosozhuang/paxos/store"
 	"hash/crc32"
 	"sync/atomic"
+	"fmt"
 )
 
 var (
@@ -28,7 +29,7 @@ var (
 )
 
 type Acceptor interface {
-	start() error
+	load() error
 	reset()
 	newInstance()
 	getInstanceID() uint64
@@ -47,6 +48,7 @@ type acceptor struct {
 }
 
 func newAcceptor(instance Instance, tp Transporter, st store.Storage) Acceptor {
+	alog = logger.AcceptorLogger
 	s := acceptorState{
 		st: st,
 	}
@@ -57,7 +59,7 @@ func newAcceptor(instance Instance, tp Transporter, st store.Storage) Acceptor {
 	}
 }
 
-func (a *acceptor) start() (err error) {
+func (a *acceptor) load() (err error) {
 	a.instanceID, err = a.state.load()
 	return
 }
@@ -104,19 +106,23 @@ func (a *acceptor) onPrepare(msg *comm.PaxosMsg) {
 	}
 	b := ballot{msg.GetProposalID(), msg.GetProposalNodeID()}
 	if b.ge(a.state.promisedBallot) {
+		replyMsg.PreAcceptID = proto.Uint64(a.state.acceptedBallot.proposalID)
+		replyMsg.PreAcceptNodeID = proto.Uint64(a.state.acceptedBallot.nodeID)
 		if a.state.acceptedBallot.proposalID > 0 {
 			replyMsg.Value = a.state.acceptedValue
 		}
 		a.state.promisedBallot = b
 		if err := a.state.save(a.instanceID, a.instance.getChecksum()); err != nil {
-			alog.Error(err)
+			alog.Errorf("Acceptor on prepare save state error: %v.\n", err)
 			return
 		}
 	} else {
 		replyMsg.RejectByPromiseID = proto.Uint64(a.state.promisedBallot.proposalID)
 	}
 
-	a.tp.send(msg.GetNodeID(), comm.MsgType_Paxos, replyMsg)
+	if err := a.tp.send(msg.GetNodeID(), comm.MsgType_Paxos, replyMsg); err != nil {
+		alog.Errorf("Acceptor on prepare send message error: %v.\n", err)
+	}
 }
 
 func (a *acceptor) onAccept(msg *comm.PaxosMsg) {
@@ -140,13 +146,16 @@ func (a *acceptor) onAccept(msg *comm.PaxosMsg) {
 		a.state.acceptedBallot = b
 		a.state.acceptedValue = msg.Value
 		if err := a.state.save(a.instanceID, a.instance.getChecksum()); err != nil {
+			alog.Errorf("Acceptor on accept save state error: %v.\n", err)
 			return
 		}
 	} else {
 		replyMsg.RejectByPromiseID = proto.Uint64(a.state.promisedBallot.proposalID)
 	}
 
-	a.tp.send(msg.GetNodeID(), comm.MsgType_Paxos, replyMsg)
+	if err := a.tp.send(msg.GetNodeID(), comm.MsgType_Paxos, replyMsg); err != nil {
+		alog.Errorf("Acceptor on accept send message error: %v.\n", err)
+	}
 }
 
 type acceptorState struct {
@@ -182,8 +191,7 @@ func (a *acceptorState) save(instanceID uint64, checksum uint32) error {
 
 	b, err := proto.Marshal(state)
 	if err != nil {
-		alog.Error(err)
-		return err
+		return fmt.Errorf("marshal state error: %v", err)
 	}
 	return a.st.Set(instanceID, b)
 }
@@ -202,7 +210,7 @@ func (a *acceptorState) load() (uint64, error) {
 	}
 	state := &comm.AcceptorStateData{}
 	if err = proto.Unmarshal(b, state); err != nil {
-		return instanceID, err
+		return instanceID, fmt.Errorf("unmarshal state error: %v", err)
 	}
 	a.promisedBallot.proposalID = state.GetPromisedID()
 	a.promisedBallot.nodeID = state.GetPromisedNodeID()
