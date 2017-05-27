@@ -27,8 +27,8 @@ import (
 )
 
 var (
-	log = logger.PaxosLogger
-	errChecksumFailed = errors.New("checksum failed")
+	log               = logger.PaxosLogger
+	errChecksumFailed = errors.New("verify checksum failed")
 )
 
 type Instance interface {
@@ -56,31 +56,56 @@ type instance struct {
 }
 
 func NewInstance(groupCfg comm.GroupConfig, sender comm.Sender, st store.Storage) (comm.Instance, error) {
+	log = logger.PaxosLogger
 	var err error
 	i := &instance{
-		groupCfg:   groupCfg,
-		sms:     make(map[uint32]comm.StateMachine),
-		ctx:     context.TODO(),
-		ch:      make(chan *comm.PaxosMsg, 10),
-		retries: &msgHeap{},
+		groupCfg: groupCfg,
+		st:       st,
+		sms:      make(map[uint32]comm.StateMachine),
+		ctx:      context.TODO(),
+		ch:       make(chan *comm.PaxosMsg, 10),
+		retries:  &msgHeap{},
 	}
 	heap.Init(i.retries)
-
-	tp := newTransporter(groupCfg, sender)
-	i.acceptor = newAcceptor(i, tp, st)
-	i.learner = newLearner(groupCfg, i, tp, st, i.acceptor, i.cpm)
-	i.proposer = newProposer(i, tp, i.learner)
 
 	i.cpm, err = checkpoint.NewCheckpointManager(groupCfg, i, st)
 	if err != nil {
 		return nil, err
 	}
+	tp := newTransporter(groupCfg, sender)
+	i.acceptor = newAcceptor(i, tp, st)
+	i.learner = newLearner(groupCfg, i, tp, st, i.acceptor, i.cpm)
+	i.proposer = newProposer(i, tp, i.learner)
+
 	return i, nil
 }
 
 func (i *instance) Start(ctx context.Context, stopped <-chan struct{}) error {
-	i.learner.start(stopped)
-	if err := i.acceptor.start(); err != nil {
+	ch := make(chan error)
+	go func() {
+		if err := i.start(stopped); err != nil {
+			ch <- err
+		} else {
+			close(ch)
+		}
+	}()
+
+	select {
+	case <-stopped:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	case err, ok := <-ch:
+		if !ok {
+			return nil
+		}
+		return err
+	}
+}
+
+func (i *instance) start(stopped <-chan struct{}) error {
+	go i.handleRetry(stopped)
+	if err := i.acceptor.load(); err != nil {
 		return err
 	}
 
@@ -106,11 +131,8 @@ func (i *instance) Start(ctx context.Context, stopped <-chan struct{}) error {
 		return err
 	}
 
-	i.learner.AskForLearn(time.Second * 3)
-
-	if err := i.cpm.Start(ctx, stopped); err != nil {
-		return err
-	}
+	i.learner.start(stopped)
+	i.cpm.Start(stopped)
 
 	return nil
 }
@@ -118,9 +140,11 @@ func (i *instance) Start(ctx context.Context, stopped <-chan struct{}) error {
 func (i *instance) Stop() {
 	if i.cpm != nil {
 		i.cpm.Stop()
+		i.cpm = nil
 	}
 	if i.learner != nil {
 		i.learner.stop()
+		i.learner = nil
 	}
 }
 
@@ -148,7 +172,7 @@ func (i *instance) initChecksum() error {
 	}
 	var state comm.AcceptorStateData
 	if err := proto.Unmarshal(value, &state); err != nil {
-		return err
+		return fmt.Errorf("instance: unmarshal acceptor state error: %v", err)
 	}
 	i.checksum = state.GetChecksum()
 	return nil
@@ -156,7 +180,7 @@ func (i *instance) initChecksum() error {
 
 func (i *instance) replay(start, end uint64) error {
 	if start < i.cpm.GetMinChosenInstanceID() {
-		return fmt.Errorf("%d%d", start, i.cpm.GetMinChosenInstanceID())
+		return fmt.Errorf("instance: start instance id %d less then min chosen instance id %d", start, i.cpm.GetMinChosenInstanceID())
 	}
 	var state comm.AcceptorStateData
 	for id := start; id < end; id++ {
@@ -165,7 +189,7 @@ func (i *instance) replay(start, end uint64) error {
 			return err
 		}
 		if err = proto.Unmarshal(b, &state); err != nil {
-			return err
+			return fmt.Errorf("instance: unmarshal acceptor state error: %v", err)
 		}
 		if err = i.execute(id, state.GetAcceptedValue()); err != nil {
 			return err
@@ -209,27 +233,19 @@ func (i *instance) AddStateMachine(sms ...comm.StateMachine) {
 	for _, sm := range sms {
 		if _, ok := i.sms[sm.GetStateMachineID()]; !ok {
 			i.sms[sm.GetStateMachineID()] = sm
+		} else {
+			log.Warningf("Instance state machine %d already exist.\n", sm.GetStateMachineID())
 		}
 	}
 }
 
-func compare(a, b []byte) bool {
-	if len(a) != len(b) {
-		return false
-	}
-	for i, x := range a {
-		if x != b[i] {
-			return false
-		}
-	}
-	return true
-}
-
-func (i *instance) handleRetry() {
+func (i *instance) handleRetry(stopped <-chan struct{}) {
 	ticker := time.NewTicker(time.Second)
 	defer ticker.Stop()
 	for {
 		select {
+		case <-stopped:
+			return
 		case <-ticker.C:
 			i.retryPaxosMessage()
 		case msg := <-i.ch:
@@ -267,6 +283,7 @@ func (i *instance) ReceivePaxosMessage(msg *comm.PaxosMsg) {
 
 	case comm.PaxosMsgType_Prepare:
 		if err := i.verifyChecksum(msg); err != nil {
+			log.Errorf("Instance verify prepare message checksum error: %v.\n", err)
 			return
 		}
 		if msg.GetInstanceID() == i.acceptor.getInstanceID() ||
@@ -282,6 +299,7 @@ func (i *instance) ReceivePaxosMessage(msg *comm.PaxosMsg) {
 
 	case comm.PaxosMsgType_Accept:
 		if err := i.verifyChecksum(msg); err != nil {
+			log.Errorf("Instance verify accept message checksum error: %v.\n", err)
 			return
 		}
 		if msg.GetInstanceID() == i.acceptor.getInstanceID() ||
@@ -297,22 +315,25 @@ func (i *instance) ReceivePaxosMessage(msg *comm.PaxosMsg) {
 
 	case comm.PaxosMsgType_AskForLearn:
 		if err := i.verifyChecksum(msg); err != nil {
+			log.Errorf("Instance verify ask for learn message checksum error: %v.\n", err)
 			return
 		}
 		i.learner.onAskForLearn(msg)
 	case comm.PaxosMsgType_ConfirmAskForLearn:
 		if err := i.verifyChecksum(msg); err != nil {
+			log.Errorf("Instance verify confirm ask for learn message checksum error: %v.\n", err)
 			return
 		}
 		i.learner.onConfirmAskForLearn(msg)
 	case comm.PaxosMsgType_ProposalFinished:
 		if err := i.verifyChecksum(msg); err != nil {
+			log.Errorf("Instance verify proposal finished message checksum error: %v.\n", err)
 			return
 		}
 		i.learner.onProposalFinished(msg)
 		if i.learner.isLearned() {
 			if err := i.execute(i.learner.getInstanceID(), i.learner.getValue()); err != nil {
-				log.Error(err)
+				log.Errorf("Instance execute state machine error: %v.\n", err)
 				i.proposer.cancelSkipPrepare()
 				return
 			}
@@ -322,12 +343,13 @@ func (i *instance) ReceivePaxosMessage(msg *comm.PaxosMsg) {
 		}
 	case comm.PaxosMsgType_SendValue:
 		if err := i.verifyChecksum(msg); err != nil {
+			log.Errorf("Instance verify send value message checksum error: %v.\n", err)
 			return
 		}
 		i.learner.onSendValue(msg)
 		if i.learner.isLearned() {
 			if err := i.execute(i.learner.getInstanceID(), i.learner.getValue()); err != nil {
-				log.Error(err)
+				log.Errorf("Instance execute state machine error: %v.\n", err)
 				i.proposer.cancelSkipPrepare()
 				return
 			}
@@ -337,21 +359,24 @@ func (i *instance) ReceivePaxosMessage(msg *comm.PaxosMsg) {
 		}
 	case comm.PaxosMsgType_SendInstanceID:
 		if err := i.verifyChecksum(msg); err != nil {
+			log.Errorf("Instance verify send instance id message checksum error: %v.\n", err)
 			return
 		}
 		i.learner.onSendInstanceID(msg)
 	case comm.PaxosMsgType_AckSendValue:
 		if err := i.verifyChecksum(msg); err != nil {
+			log.Errorf("Instance verify ack send value message checksum error: %v.\n", err)
 			return
 		}
 		i.learner.onAckSendValue(msg)
 	case comm.PaxosMsgType_AskForCheckpoint:
 		if err := i.verifyChecksum(msg); err != nil {
+			log.Errorf("Instance verify ask for checkpoint message checksum error: %v.\n", err)
 			return
 		}
 		i.learner.onAskForCheckpoint(msg)
 	default:
-		log.Errorf("Unknown paxos message type %v.\n", msg.GetType())
+		log.Errorf("Instance receive unknown paxos message type %v.\n", msg.GetType())
 		return
 	}
 }
@@ -360,13 +385,14 @@ func (i *instance) ReceiveCheckpointMessage(msg *comm.CheckpointMsg) {
 	switch msg.GetType() {
 	case comm.CheckpointMsgType_SendFile:
 		if !i.cpm.IsAskForCheckpoint() {
+			log.Warning("Instance checkpoint manager not in ask for checkpoint.")
 			return
 		}
 		i.learner.onSendCheckpoint(msg)
 	case comm.CheckpointMsgType_AckSendFile:
 		i.learner.onAckSendCheckpoint(msg)
 	default:
-		log.Errorf("Unknown checkpoint message type %v.\n", msg.GetType())
+		log.Errorf("Instance receive unknown checkpoint message type %v.\n", msg.GetType())
 		return
 	}
 }
@@ -381,7 +407,6 @@ func (i *instance) verifyChecksum(msg *comm.PaxosMsg) error {
 		return nil
 	}
 	if msg.GetChecksum() != i.checksum {
-		log.Error("checksum failed")
 		return errChecksumFailed
 	}
 	return nil
@@ -390,7 +415,10 @@ func (i *instance) verifyChecksum(msg *comm.PaxosMsg) error {
 func (i *instance) execute(instanceID uint64, v []byte) error {
 	var smid uint32
 	if err := comm.BytesToObject(v[:comm.SMIDLen], &smid); err != nil {
-		return err
+		return fmt.Errorf("convert bytes to sm id error: %v", err)
+	}
+	if smid == 0 {
+		return nil
 	}
 	sm, ok := i.sms[smid]
 	if !ok {
@@ -464,7 +492,7 @@ func (i *instance) ContinueCleaner() {
 	i.cpm.GetCleaner().Continue()
 }
 
-func (i *instance) SetMaxLogCount(c int) {
+func (i *instance) SetMaxLogCount(c int64) {
 	i.cpm.GetCleaner().SetMaxLogCount(c)
 }
 
@@ -475,7 +503,7 @@ func (i *instance) GetProposerInstanceID() uint64 {
 func (i *instance) ExecuteForCheckpoint(instanceID uint64, v []byte) error {
 	var smid uint32
 	if err := comm.BytesToObject(v[:comm.SMIDLen], &smid); err != nil {
-		return err
+		return fmt.Errorf("instance: convert bytes to smid error: %v", err)
 	}
 	sm, ok := i.sms[smid]
 	if !ok {
@@ -495,6 +523,7 @@ func (i *instance) lockCheckpointState() (err error) {
 	}()
 	for _, sm := range i.sms {
 		if err = sm.LockCheckpointState(); err != nil {
+			log.Errorf("Lock sm %d checkpoint state error: %v.\n", sm.GetStateMachineID(), err)
 			return
 		}
 		locks = append(locks, sm)
