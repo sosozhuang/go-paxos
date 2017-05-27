@@ -68,6 +68,7 @@ const (
 )
 
 func newProposer(instance Instance, tp Transporter, learner Learner) Proposer {
+	plog = logger.ProposerLogger
 	state := proposerState{
 		proposalID:     1,
 		lastProposalID: 0,
@@ -107,9 +108,10 @@ func (p *proposer) setInstanceID(id uint64) {
 func (p *proposer) newValue(ctx context.Context) {
 	value, ok := ctx.Value("value").([]byte)
 	if !ok {
-		plog.Error("")
+		plog.Error("Proposer can't get value from context.")
 		return
 	}
+
 	p.state.setValue(value)
 	p.prepareTimeout = startPrepareTimeout
 	p.acceptTimeout = startAcceptTimeout
@@ -125,6 +127,7 @@ func (p *proposer) newValue(ctx context.Context) {
 		p.preparing = false
 		p.accepting = false
 	case <-done:
+		plog.Debugf("Proposal finished.")
 	}
 }
 
@@ -205,7 +208,9 @@ func (p *proposer) broadcastPrepareMessage(ctx context.Context, done chan struct
 
 	go func() {
 		p.instance.ReceivePaxosMessage(msg)
-		p.tp.broadcast(comm.MsgType_Paxos, msg)
+		if err := p.tp.broadcast(comm.MsgType_Paxos, msg); err != nil {
+			plog.Errorf("Proposer broadcast prepare message error: %v.\n", err)
+		}
 	}()
 
 	select {
@@ -213,17 +218,19 @@ func (p *proposer) broadcastPrepareMessage(ctx context.Context, done chan struct
 		return
 	case <-pctx.Done():
 		//timeout
-		plog.Warning(pctx.Err())
+		plog.Warning("Proposer prepare message time out.")
 		if p.prepareTimeout < maxPrepareTimeout {
 			p.prepareTimeout *= 2
 		}
 		go p.prepare(ctx, done, p.rejected)
 	case <-ac:
-		//accept
+		//accepted
+		plog.Debug("Proposer prepare finished, try accept.")
 		p.skipPrepare = true
 		p.accept(ctx, done)
 	case <-rc:
-		//reject
+		//rejected
+		plog.Debug("Proposer prepare rejected, try again.")
 		go func() {
 			time.Sleep(time.Millisecond * 30)
 			p.prepare(ctx, done, p.rejected)
@@ -233,12 +240,14 @@ func (p *proposer) broadcastPrepareMessage(ctx context.Context, done chan struct
 
 func (p *proposer) onPrepareReply(msg *comm.PaxosMsg) {
 	if msg.GetInstanceID() != p.instanceID {
-		log.Warningf("%d%d\n", msg.GetInstanceID(), p.instanceID)
+		log.Warningf("Proposer receive prepare reply message instance id %d, current instance id %d.\n",
+			msg.GetInstanceID(), p.instanceID)
 		return
 	}
 	p.prepareMu.RLock()
-	defer p.prepareMu.RUnlock()
-	if f, ok := p.prepareReplies[msg.GetProposalID()]; ok {
+	f, ok := p.prepareReplies[msg.GetProposalID()]
+	p.prepareMu.RUnlock()
+	if ok {
 		f(msg)
 	}
 }
@@ -332,7 +341,9 @@ func (p *proposer) broadcastAcceptMessage(ctx context.Context, done chan struct{
 	}()
 
 	go func() {
-		p.tp.broadcast(comm.MsgType_Paxos, msg)
+		if err := p.tp.broadcast(comm.MsgType_Paxos, msg); err != nil {
+			plog.Errorf("Proposer broadcast accept message error: %v.\n", err)
+		}
 		p.instance.ReceivePaxosMessage(msg)
 	}()
 
@@ -341,7 +352,7 @@ func (p *proposer) broadcastAcceptMessage(ctx context.Context, done chan struct{
 		return
 	case <-pctx.Done():
 		//timeout
-		plog.Warning(pctx.Err())
+		plog.Warning("Proposer accept message time out.")
 		if p.acceptTimeout < maxAcceptTimeout {
 			p.acceptTimeout *= 2
 		}
@@ -354,11 +365,13 @@ func (p *proposer) broadcastAcceptMessage(ctx context.Context, done chan struct{
 		go p.prepare(ctx, done, p.rejected)
 	case <-ac:
 		//accept
+		plog.Debug("Proposer accept finished, try to learn.")
 		p.accepting = false
 		p.learner.proposalFinished(p.instanceID, msg.GetProposalID())
 		close(done)
 	case <-rc:
 		//reject
+		plog.Debug("Proposer accept rejected, try prepare again.")
 		go func() {
 			time.Sleep(time.Millisecond * 30)
 			p.prepare(ctx, done, p.rejected)
@@ -368,12 +381,15 @@ func (p *proposer) broadcastAcceptMessage(ctx context.Context, done chan struct{
 
 func (p *proposer) onAcceptReply(msg *comm.PaxosMsg) {
 	if msg.GetInstanceID() != p.instanceID {
-		log.Warningf("%d%d\n", msg.GetInstanceID(), p.instanceID)
+		log.Warningf("Proposer receive accept reply message instance id %d, current instance id %d.\n",
+			msg.GetInstanceID(), p.instanceID)
 		return
 	}
 	p.acceptMu.RLock()
-	defer p.acceptMu.RUnlock()
-	if f, ok := p.acceptReplies[msg.GetProposalID()]; ok {
+	f, ok := p.acceptReplies[msg.GetProposalID()]
+	p.acceptMu.RUnlock()
+
+	if ok {
 		f(msg)
 	}
 }
