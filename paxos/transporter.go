@@ -17,14 +17,14 @@ import (
 	"github.com/gogo/protobuf/proto"
 	"github.com/sosozhuang/paxos/comm"
 	"hash/crc32"
-	"errors"
+	"fmt"
 )
 
 type Transporter interface {
 	send(uint64, comm.MsgType, proto.Message) error
-	broadcast(comm.MsgType, proto.Message)
-	broadcastToFollowers(comm.MsgType, proto.Message)
-	broadcastToLearnNodes(comm.MsgType, proto.Message)
+	broadcast(comm.MsgType, proto.Message) error
+	broadcastToFollowers(comm.MsgType, proto.Message) error
+	broadcastToLearnNodes(comm.MsgType, proto.Message) error
 }
 
 type transporter struct {
@@ -48,7 +48,7 @@ func (t *transporter) send(nodeID uint64, msgType comm.MsgType, msg proto.Messag
 
 	addr, ok := t.groupCfg.GetMembers()[nodeID]
 	if !ok {
-		return errors.New("can't find node")
+		return fmt.Errorf("transporter: can't find node id: %d", nodeID)
 	}
 	return t.sender.SendMessage(addr, b)
 }
@@ -61,80 +61,93 @@ func (t *transporter) pack(msgType comm.MsgType, pb proto.Message) ([]byte, erro
 	}
 	b, err := comm.ObjectToBytes(t.groupCfg.GetGroupID())
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("transporter: convert group id %d to bytes error: %v",
+			t.groupCfg.GetGroupID(), err)
 	}
 	h, err := proto.Marshal(header)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("transporter: marshal message header error: %v", err)
 	}
 	l, err := comm.IntToBytes(len(h))
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("transporter: convert message header length to bytes error: %v", err)
 	}
 	b = append(b, l...)
 	b = append(b, h...)
 	m, err := proto.Marshal(pb)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("transporter: marshal message error: %v", err)
 	}
 	l, err = comm.IntToBytes(len(m))
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("transporter: convert message length to bytes error: %v", err)
 	}
 	b = append(b, l...)
 	b = append(b, m...)
 	checksum := crc32.Checksum(b, crcTable)
 	l, err = comm.ObjectToBytes(checksum)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("transporter: convert checksum to bytes error: %v", err)
 	}
 	b = append(b, l...)
 	return b, nil
 }
 
-func (t *transporter) broadcast(msgType comm.MsgType, msg proto.Message) {
+func (t *transporter) broadcast(msgType comm.MsgType, msg proto.Message) error {
 	b, err := t.pack(msgType, msg)
 	if err != nil {
-		log.Error(err)
-		return
+		return err
 	}
 
+	errs := make([]error, 0)
 	members := t.groupCfg.GetMembers()
 	for id, addr := range members {
 		if id != t.groupCfg.GetNodeID() {
 			if err = t.sender.SendMessage(addr, b); err != nil {
-				log.Error(err)
+				errs = append(errs, fmt.Errorf("send message to %s error: %v", addr, err))
 			}
 		}
 	}
+	if len(errs) > 0 {
+		return fmt.Errorf("transporter: %v", errs)
+	}
+	return nil
 }
 
-func (t *transporter) broadcastToFollowers(msgType comm.MsgType, msg proto.Message) {
+func (t *transporter) broadcastToFollowers(msgType comm.MsgType, msg proto.Message) error {
 	b, err := t.pack(msgType, msg)
 	if err != nil {
-		log.Error(err)
-		return
+		return err
 	}
 
+	errs := make([]error, 0)
 	followers := t.groupCfg.GetFollowers()
 	for _, addr := range followers {
 		if err = t.sender.SendMessage(addr, b); err != nil {
-			log.Error(err)
+			errs = append(errs, fmt.Errorf("send message to %s error: %v", addr, err))
 		}
 	}
+	if len(errs) > 0 {
+		return fmt.Errorf("transporter: %v", errs)
+	}
+	return nil
 }
 
-func (t *transporter) broadcastToLearnNodes(msgType comm.MsgType, msg proto.Message) {
+func (t *transporter) broadcastToLearnNodes(msgType comm.MsgType, msg proto.Message) error {
 	b, err := t.pack(msgType, msg)
 	if err != nil {
-		log.Error(err)
-		return
+		return err
 	}
 
+	errs := make([]error, 0)
 	nodes := t.groupCfg.GetLearnNodes()
 	for _, addr := range nodes {
 		if err = t.sender.SendMessage(addr, b); err != nil {
-			log.Error(err)
+			errs = append(errs, fmt.Errorf("send message to %s error: %v", addr, err))
 		}
 	}
+	if len(errs) > 0 {
+		return fmt.Errorf("transporter: %v", errs)
+	}
+	return nil
 }
