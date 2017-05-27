@@ -26,6 +26,7 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+	"fmt"
 )
 
 var (
@@ -38,7 +39,6 @@ type Learner interface {
 	getInstanceID() uint64
 	setInstanceID(uint64)
 	newInstance()
-	AskForLearn(time.Duration)
 	onAskForLearn(*comm.PaxosMsg)
 	onConfirmAskForLearn(*comm.PaxosMsg)
 	onProposalFinished(*comm.PaxosMsg)
@@ -76,44 +76,41 @@ type learner struct {
 	cps                Sender
 	cpr                checkpoint.Receiver
 	tp                 Transporter
-	st store.Storage
-	sender sender
+	st                 store.Storage
+	sender             sender
 }
 
 func newLearner(groupCfg comm.GroupConfig, instance Instance, tp Transporter, st store.Storage,
 	acceptor Acceptor, cpm checkpoint.CheckpointManager) Learner {
+	llog = logger.LearnerLogger
 	learner := &learner{
 		acceptor: acceptor,
-		groupCfg:    groupCfg,
+		groupCfg: groupCfg,
 		instance: instance,
 		cpm:      cpm,
 		tp:       tp,
-		st: st,
-		done:     make(chan struct{}),
+		st:       st,
+		done: make(chan struct{}),
 	}
 	learner.sender = sender{
 		Learner: learner,
 		st:      st,
 	}
 
+	learner.cps = newCheckpointSender(learner, instance, cpm)
 	learner.cpr = checkpoint.NewReceiver(st)
 	return learner
 }
 
-func (l *learner) setStopped(stopped <-chan struct{}) {
-	l.stopped = stopped
-}
-
 func (l *learner) start(stopped <-chan struct{}) {
 	l.stopped = stopped
-	//l.sender.start()
+	l.askForLearn(time.Second * 3)
 }
 
 func (l *learner) stop() {
+	close(l.done)
 	l.sender.stop()
-	if l.cps != nil {
-		l.cps.Stop()
-	}
+	l.cps.stop()
 }
 
 func (l *learner) newInstance() {
@@ -154,19 +151,24 @@ func (l *learner) proposalFinished(instanceID, proposalID uint64) {
 	}
 
 	l.instance.ReceivePaxosMessage(msg)
-	l.tp.broadcast(comm.MsgType_Paxos, msg)
+	if err := l.tp.broadcast(comm.MsgType_Paxos, msg); err != nil {
+		llog.Errorf("Learner broadcast message error: %v.\n", err)
+	}
 }
 
 func (l *learner) onProposalFinished(msg *comm.PaxosMsg) {
 	if l.instanceID != msg.GetInstanceID() {
+		llog.Warningf("Learner receive message instance id %d, current instance id %d.\n", l.instanceID, msg.GetInstanceID())
 		return
 	}
 	if !l.acceptor.getAcceptorState().acceptedBallot.valid() {
+		llog.Warning("Learner check acceptor's accepted ballot invalid.")
 		return
 	}
 
 	b := ballot{msg.GetProposalID(), msg.GetProposalNodeID()}
 	if l.acceptor.getAcceptorState().acceptedBallot.ne(b) {
+		llog.Warning("Learner receive message ballot not equals to acceptor's accepted ballot.")
 		return
 	}
 
@@ -185,7 +187,9 @@ func (l *learner) broadcastToFollowers() {
 		Checksum:       proto.Uint32(l.instance.getChecksum()),
 	}
 
-	l.tp.broadcastToFollowers(comm.MsgType_Paxos, msg)
+	if err := l.tp.broadcastToFollowers(comm.MsgType_Paxos, msg); err != nil {
+		llog.Errorf("Learner broadcast message to followers error: %v.\n", err)
+	}
 }
 
 func (l *learner) sendValue(nodeID, instanceID uint64, b ballot, value []byte, checksum uint32, ack bool) {
@@ -197,24 +201,27 @@ func (l *learner) sendValue(nodeID, instanceID uint64, b ballot, value []byte, c
 		ProposalNodeID: proto.Uint64(b.nodeID),
 		Value:          value,
 		Checksum:       proto.Uint32(checksum),
+		AckFlag:  proto.Bool(ack),
 	}
-	if ack {
-		msg.AckFlag = proto.Bool(ack)
+
+	if err := l.tp.send(nodeID, comm.MsgType_Paxos, msg); err != nil {
+		llog.Errorf("Learner send message error: %v.\n", err)
 	}
-	l.tp.send(nodeID, comm.MsgType_Paxos, msg)
 }
 
 func (l *learner) onSendValue(msg *comm.PaxosMsg) {
 	if msg.GetInstanceID() != l.instanceID {
+		llog.Warningf("Learner receive message instance id %d, current instance id %d.\n",
+			msg.GetInstanceID(), l.instanceID)
 		return
 	}
 	b := ballot{msg.GetProposalID(), msg.GetProposalNodeID()}
 	if err := l.state.learnAndSave(msg.GetInstanceID(), b, msg.GetValue(), 0); err != nil {
-		llog.Error(err)
+		llog.Errorf("Learner save state error: %v.\n", err)
 		return
 	}
 	if msg.GetAckFlag() {
-		l.AskForLearn(time.Second * 3)
+		l.askForLearn(time.Second * 3)
 		l.ackSendValue(msg.GetNodeID())
 	}
 }
@@ -230,14 +237,16 @@ func (l *learner) ackSendValue(nodeID uint64) {
 		InstanceID: proto.Uint64(l.instanceID),
 		NodeID:     proto.Uint64(l.instance.getNodeID()),
 	}
-	l.tp.send(nodeID, comm.MsgType_Paxos, msg)
+	if err := l.tp.send(nodeID, comm.MsgType_Paxos, msg); err != nil {
+		llog.Errorf("Learner send message error: %v.\n", err)
+	}
 }
 
 func (l *learner) onAckSendValue(msg *comm.PaxosMsg) {
 	l.sender.ack(msg.GetInstanceID(), msg.GetNodeID())
 }
 
-func (l *learner) AskForLearn(d time.Duration) {
+func (l *learner) askForLearn(d time.Duration) {
 	close(l.done)
 	go func() {
 		ticker := time.NewTicker(d)
@@ -250,13 +259,13 @@ func (l *learner) AskForLearn(d time.Duration) {
 			case <-l.stopped:
 				return
 			case <-ticker.C:
-				go l.askForLearn()
+				go l.doAskForLearn()
 			}
 		}
 	}()
 }
 
-func (l *learner) askForLearn() {
+func (l *learner) doAskForLearn() {
 	l.cpm.ExitAskForCheckpoint()
 	msg := &comm.PaxosMsg{
 		Type:       comm.PaxosMsgType_AskForLearn.Enum(),
@@ -266,8 +275,12 @@ func (l *learner) askForLearn() {
 	if l.groupCfg.FollowerMode() {
 		msg.ProposalNodeID = proto.Uint64(l.groupCfg.GetFollowNodeID())
 	}
-	l.tp.broadcast(comm.MsgType_Paxos, msg)
-	l.tp.broadcastToLearnNodes(comm.MsgType_Paxos, msg)
+	if err := l.tp.broadcast(comm.MsgType_Paxos, msg); err != nil {
+		llog.Errorf("Learner broadcast message error: %v.\n", err)
+	}
+	if err := l.tp.broadcastToLearnNodes(comm.MsgType_Paxos, msg); err != nil {
+		llog.Errorf("Learner broadcast message to learn nodes error: %v.\n", err)
+	}
 }
 
 func (l *learner) onAskForLearn(msg *comm.PaxosMsg) {
@@ -283,12 +296,12 @@ func (l *learner) onAskForLearn(msg *comm.PaxosMsg) {
 			if msg.GetInstanceID() == l.instanceID-1 {
 				value, err := l.st.Get(msg.GetInstanceID())
 				if err != nil {
-					log.Error(err)
+					llog.Errorf("Learner get instance id %d value error: %v.\n", msg.GetInstanceID(), err)
 					return
 				}
 				var state comm.AcceptorStateData
 				if err = proto.Unmarshal(value, &state); err != nil {
-					log.Error(err)
+					llog.Errorf("Learner unmarshal instance id %d value error: %v.\n", msg.GetInstanceID(), err)
 					return
 				}
 				b := ballot{state.GetAcceptedID(), state.GetAcceptedNodeID()}
@@ -306,13 +319,15 @@ func (l *learner) confirmAskForLearn(nodeID uint64) {
 		InstanceID: proto.Uint64(l.instanceID),
 		NodeID:     proto.Uint64(l.instance.getNodeID()),
 	}
-	l.tp.send(nodeID, comm.MsgType_Paxos, msg)
+	if err := l.tp.send(nodeID, comm.MsgType_Paxos, msg); err != nil {
+		llog.Errorf("Learner send message error: %v.\n", err)
+	}
 	l.learning = true
 }
 
 func (l *learner) onConfirmAskForLearn(msg *comm.PaxosMsg) {
 	if !l.sender.confirm(msg.GetInstanceID(), msg.GetNodeID()) {
-		llog.Error("confirm failed.")
+		llog.Error("Learner confirm message failed.")
 	}
 }
 
@@ -327,25 +342,27 @@ func (l *learner) sendInstanceID(instanceID, nodeID uint64) {
 	if l.instanceID-instanceID > 50 {
 		cp, err := l.groupCfg.GetSystemCheckpoint()
 		if err == nil {
-			msg.SystemVariables = cp
+			msg.SystemVar = cp
 
 		}
 		cp, err = l.groupCfg.GetMasterCheckpoint()
 		if err == nil {
-			msg.MasterVariables = cp
+			msg.MasterVar = cp
 		}
 	}
-	l.tp.send(nodeID, comm.MsgType_Paxos, msg)
+	if err := l.tp.send(nodeID, comm.MsgType_Paxos, msg); err != nil {
+		llog.Errorf("Learner send message error: %v.\n", err)
+	}
 }
 
 func (l *learner) onSendInstanceID(msg *comm.PaxosMsg) {
 	l.setLastSeenInstanceID(msg.GetCurInstanceID(), msg.GetNodeID())
 
-	if len(msg.GetSystemVariables()) > 0 {
-		l.groupCfg.UpdateSystemByCheckpoint(msg.GetSystemVariables())
+	if len(msg.GetSystemVar()) > 0 {
+		l.groupCfg.UpdateSystemByCheckpoint(msg.GetSystemVar())
 	}
-	if len(msg.GetMasterVariables()) > 0 {
-		l.groupCfg.UpdateMasterByCheckpoint(msg.GetMasterVariables())
+	if len(msg.GetMasterVar()) > 0 {
+		l.groupCfg.UpdateMasterByCheckpoint(msg.GetMasterVar())
 	}
 
 	if msg.GetInstanceID() != l.instanceID {
@@ -375,7 +392,7 @@ func (l *learner) getChecksum() uint32 {
 
 func (l *learner) askForCheckpoint(nodeID uint64) {
 	if err := l.cpm.PrepareAskForCheckpoint(nodeID); err != nil {
-		log.Error(err)
+		llog.Errorf("Learner prepare ask for checkpoint error: %v.\n", err)
 		return
 	}
 	msg := &comm.PaxosMsg{
@@ -383,18 +400,16 @@ func (l *learner) askForCheckpoint(nodeID uint64) {
 		NodeID:     proto.Uint64(l.instance.getNodeID()),
 		InstanceID: proto.Uint64(l.instanceID),
 	}
-	l.tp.send(nodeID, comm.MsgType_Paxos, msg)
+	if err := l.tp.send(nodeID, comm.MsgType_Paxos, msg); err != nil {
+		llog.Errorf("Learner send message error: %v.\n", err)
+	}
 }
 
 func (l *learner) onAskForCheckpoint(msg *comm.PaxosMsg) {
-	if l.cps == nil {
-		l.cps = newCheckpointSender(l, l.instance, l.cpm)
-		l.cps.Start()
-	} else if l.cps.IsFinished() {
-		l.cps.Start()
+	if l.cps.isFinished() {
+		l.cps.start(msg.GetNodeID())
 	} else {
-		log.Error("Checkpoint sender is running.")
-		return
+		llog.Error("Learner's checkpoint sender is running, can't send for this.")
 	}
 }
 
@@ -407,8 +422,7 @@ func (l *learner) sendCheckpointBegin(nodeID, uuid, sequence, checkpointInstance
 		Sequence:             proto.Uint64(sequence),
 		CheckpointInstanceID: proto.Uint64(checkpointInstanceID),
 	}
-	l.tp.send(nodeID, comm.MsgType_Checkpoint, msg)
-	return nil
+	return l.tp.send(nodeID, comm.MsgType_Checkpoint, msg)
 }
 
 func (l *learner) sendCheckpointEnd(nodeID, uuid, sequence, checkpointInstanceID uint64) error {
@@ -436,7 +450,7 @@ func (l *learner) sendCheckpoint(nodeID, uuid, sequence, checkpointInstanceID ui
 		FilePath:             proto.String(path),
 		SMID:                 proto.Uint32(smid),
 		Offset:               proto.Int64(offset),
-		Buffer:               b,
+		Bytes:               b,
 	}
 	return l.tp.send(nodeID, comm.MsgType_Checkpoint, msg)
 }
@@ -453,8 +467,8 @@ func (l *learner) onSendCheckpointProgressing(msg *comm.CheckpointMsg) error {
 }
 
 func (l *learner) onSendCheckpointEnd(msg *comm.CheckpointMsg) error {
-	if l.cpr.IsFinished(msg.GetNodeID(), msg.GetUUID(), msg.GetSequence()) {
-		return errors.New("")
+	if !l.cpr.IsFinished(msg.GetNodeID(), msg.GetUUID(), msg.GetSequence()) {
+		return errors.New("checkpoint receiver not finished")
 	}
 	// todo: LoadCheckpointState for state machine
 	util.ExitPaxos(-1)
@@ -472,12 +486,13 @@ func (l *learner) onSendCheckpoint(msg *comm.CheckpointMsg) {
 		err = l.onSendCheckpointEnd(msg)
 	}
 	if err != nil {
+		llog.Errorf("Learner on send checkpoint error: %v.\n", err)
 		l.cpr.Reset()
-		l.AskForLearn(time.Second * 5)
+		l.askForLearn(time.Second * 5)
 		l.ackSendCheckpoint(msg.GetNodeID(), msg.GetUUID(), msg.GetSequence(), comm.CheckPointMsgFlag_Failed)
 	} else {
 		l.ackSendCheckpoint(msg.GetNodeID(), msg.GetUUID(), msg.GetSequence(), comm.CheckPointMsgFlag_Successful)
-		l.AskForLearn(time.Minute * 2)
+		l.askForLearn(time.Minute * 2)
 	}
 }
 
@@ -489,15 +504,17 @@ func (l *learner) ackSendCheckpoint(nodeID, uuid, sequence uint64, flag comm.Che
 		Sequence: proto.Uint64(sequence),
 		Flag:     flag.Enum(),
 	}
-	l.tp.send(nodeID, comm.MsgType_Checkpoint, msg)
+	if err := l.tp.send(nodeID, comm.MsgType_Checkpoint, msg); err != nil {
+		llog.Errorf("Learner send message error: %v.\n", err)
+	}
 }
 
 func (l *learner) onAckSendCheckpoint(msg *comm.CheckpointMsg) {
-	if l.cps != nil && !l.cps.IsFinished() {
+	if !l.cps.isFinished() {
 		if msg.GetFlag() == comm.CheckPointMsgFlag_Successful {
-			l.cps.Ack(msg.GetNodeID(), msg.GetUUID(), msg.GetSequence())
+			l.cps.ack(msg.GetNodeID(), msg.GetUUID(), msg.GetSequence())
 		} else {
-			l.cps.Stop()
+			l.cps.stop()
 		}
 	}
 }
@@ -538,7 +555,7 @@ func (l *learnerState) learnAndSave(instanceID uint64, b ballot, value []byte, c
 	}
 	v, err := proto.Marshal(state)
 	if err != nil {
-		return err
+		return fmt.Errorf("marshal state error: %v", err)
 	}
 	if err := l.st.Set(instanceID, v); err != nil {
 		return err
@@ -665,6 +682,7 @@ func (s *sender) send(instanceID uint64, nodeID uint64) {
 
 	for count, id := 0, instanceID; id < s.Learner.getInstanceID(); id++ {
 		if cs, err = s.sendValue(id, nodeID, cs); err != nil {
+			llog.Errorf("Learner sender send value error: %v.\n", err)
 			return
 		}
 		s.lastSendTime = time.Now()
