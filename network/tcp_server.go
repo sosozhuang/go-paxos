@@ -23,11 +23,11 @@ type tcpPeerServer struct {
 func newTcpPeerServer(receiver comm.Receiver, addr string, timeout, readTimeout time.Duration, cap int) (*tcpPeerServer, error) {
 	tcpAddr, err := net.ResolveTCPAddr("tcp", addr)
 	if err != nil {
-		return nil, fmt.Errorf("tcp peer server resolver address error: %s", err)
+		return nil, fmt.Errorf("peer server: resolver %s: %v", addr, err)
 	}
 	ln, err := net.ListenTCP("tcp", tcpAddr)
 	if err != nil {
-		return nil, fmt.Errorf("tcp peer server listen address error: %s", err)
+		return nil, fmt.Errorf("peer server: listen %v: %v", tcpAddr, err)
 	}
 	return &tcpPeerServer{
 		//addr: addr,
@@ -67,7 +67,7 @@ func (t *tcpPeerServer) accept(stopped <-chan struct{}) {
 				time.Sleep(delay)
 				continue
 			}
-			log.Error("", err)
+			log.Errorf("Tcp peer server accept connetions error: %v.\n", err)
 		}
 		t.wg.Add(1)
 		sc := newTcpServerConn(conn, t.readTimeout, t.ch, f)
@@ -86,7 +86,7 @@ func (t *tcpPeerServer) handleMessage() {
 func (t *tcpPeerServer) stop() {
 	if t.listener != nil {
 		if err := t.listener.Close(); err != nil {
-			log.Error("", err)
+			log.Errorf("Tcp peer server close listener error: %v.\n", err)
 		}
 		t.listener = nil
 	}
@@ -135,7 +135,7 @@ func (t *tcpServerConn) handleRead(stopped <-chan struct{}) {
 			if n > 0 {
 				in = unpack(append(in, b[:n]...), t.ch)
 			}
-			log.Error(err)
+			log.Errorf("Tcp peer server connection read error: %v.\n", err)
 			return
 		}
 
@@ -154,7 +154,7 @@ func (t *tcpServerConn) handleRead(stopped <-chan struct{}) {
 func (t *tcpServerConn) close() {
 	if t.conn != nil {
 		if err := t.conn.Close(); err != nil {
-			log.Error(err)
+			log.Errorf("Tcp peer server connection close error: %v\n.", err)
 		}
 		t.conn = nil
 	}
