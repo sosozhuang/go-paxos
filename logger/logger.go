@@ -20,9 +20,8 @@ import (
 	"io/ioutil"
 	"log"
 	"os"
-	"sync"
-	"time"
 	"path"
+	"sync"
 )
 
 const (
@@ -50,19 +49,20 @@ type Logger interface {
 }
 
 var (
-	ProposerLogger Logger
-	AcceptorLogger Logger
-	LearnerLogger  Logger
-	PaxosLogger    Logger
-	once           sync.Once
+	paxosLogger = logrus.New()
+	dLogger     = &defaultLogger{}
+	once        sync.Once
 )
 
 func NewLogger(output, logDir, level string) (Logger, error) {
-	return newLogrusLogger(output, logDir, level)
+	l := logrus.New()
+	if err := setupLogger(l, output, logDir, level); err != nil {
+		return nil, err
+	}
+	return l, nil
 }
 
-func newLogrusLogger(output, logDir, level string) (*logrus.Logger, error) {
-	l := logrus.New()
+func setupLogger(l *logrus.Logger, output, logDir, level string) error {
 	formatter := &logrus.TextFormatter{DisableSorting: true}
 	if output == "stderr" {
 		l.Out = os.Stderr
@@ -73,7 +73,7 @@ func newLogrusLogger(output, logDir, level string) (*logrus.Logger, error) {
 	} else {
 		formatter.DisableColors = true
 		if out, err := touchLogOutput(output, logDir, true); err != nil {
-			return nil, err
+			return err
 		} else {
 			util.AddHook(func() { out.Close() })
 			l.Out = out
@@ -83,51 +83,23 @@ func newLogrusLogger(output, logDir, level string) (*logrus.Logger, error) {
 	if lvl, err := logrus.ParseLevel(level); err == nil {
 		l.Level = lvl
 	}
-	return l, nil
+	return nil
 }
 
-func SetupLogger(output, logDir, level string) error {
-	var err error
+func SetupLogger(output, logDir, level string) (err error) {
 	once.Do(func() {
-		if output != "" {
-			var l *logrus.Logger
-			l, err = newLogrusLogger(output, logDir, level)
-			if err != nil {
-				return
-			}
-			ProposerLogger = l.WithField("e", "proposer")
-			AcceptorLogger = l.WithField("e", "acceptor")
-			LearnerLogger = l.WithField("e", "learner")
-			PaxosLogger = l.WithField("e", "paxos")
-		} else {
-			ProposerLogger, err = newLogrusLogger("proposer.log", logDir, level)
-			if err != nil {
-				return
-			}
-			AcceptorLogger, err = newLogrusLogger("acceptor.log", logDir, level)
-			if err != nil {
-				return
-			}
-			LearnerLogger, err = newLogrusLogger("learner.log", logDir, level)
-			if err != nil {
-				return
-			}
-			PaxosLogger, err = newLogrusLogger("paxos.log", logDir, level)
-			if err != nil {
-				return
-			}
-		}
+		err = setupLogger(paxosLogger, output, logDir, level)
 	})
-	return err
+	return
 }
 
-func logFileName(output string) string {
-	return fmt.Sprintf("%s.%s", output, time.Now().Format("2006-01-02T15:04:05"))
+func GetLogger(pkg string) Logger {
+	return paxosLogger.WithField("pkg", pkg)
 }
 
 func touchLogOutput(output, logDir string, append bool) (*os.File, error) {
 	if output == "" {
-		return os.Stdout, nil
+		output = "paxos.log"
 	}
 	if logDir == "" {
 		logDir = "."
@@ -135,11 +107,11 @@ func touchLogOutput(output, logDir string, append bool) (*os.File, error) {
 		info, err := os.Stat(logDir)
 		if err == nil {
 			if !info.IsDir() {
-				return nil, fmt.Errorf("%s is not a directory", logDir)
+				return nil, fmt.Errorf("logger: %s is not dir", logDir)
 			}
 		} else if os.IsNotExist(err) {
 			if err = os.MkdirAll(logDir, 0755); err != nil {
-				return nil, err
+				return nil, fmt.Errorf("logger: make dir %s error: %v", logDir, err)
 			}
 		}
 	}
@@ -148,8 +120,7 @@ func touchLogOutput(output, logDir string, append bool) (*os.File, error) {
 	info, err := os.Stat(file)
 	if err == nil {
 		if info.IsDir() {
-			//name = name + string(os.PathSeparator) + "component.log"
-			return nil, fmt.Errorf("%s is a directory", output)
+			return nil, fmt.Errorf("logger: output %s is dir", output)
 		} else {
 			var flag int
 			if append {
@@ -158,15 +129,20 @@ func touchLogOutput(output, logDir string, append bool) (*os.File, error) {
 				flag = os.O_RDWR | os.O_TRUNC
 			}
 			f, err = os.OpenFile(file, flag, 0)
+			if err != nil {
+				err = fmt.Errorf("logger: open output %s error: %v", file, err)
+			}
 		}
 	} else if os.IsNotExist(err) {
 		f, err = os.Create(file)
+		if err != nil {
+			err = fmt.Errorf("logger: create output %s error: %v", file, err)
+		}
 	}
 	return f, err
 }
 
-func newDefaultLogger(output, logDir, prefix, level string) (Logger, error) {
-	l := &defaultLogger{}
+func setupDefaultLogger(l *defaultLogger, output, logDir, prefix, level string) (Logger, error) {
 	if output == "stderr" {
 		l.Logger = log.New(os.Stderr, prefix, log.LstdFlags)
 	} else if output == "stdout" {
@@ -177,7 +153,7 @@ func newDefaultLogger(output, logDir, prefix, level string) (Logger, error) {
 		if out, err := touchLogOutput(output, logDir, true); err != nil {
 			return nil, err
 		} else {
-			util.AddHook(func() {out.Close()})
+			util.AddHook(func() { out.Close() })
 			l.Logger = log.New(out, prefix, log.LstdFlags)
 		}
 	}
