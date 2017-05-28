@@ -1,10 +1,10 @@
 package network
 
 import (
-	"errors"
 	"net"
 	"sync"
 	"time"
+	"fmt"
 )
 
 type tcpPeerClient struct {
@@ -55,17 +55,15 @@ func (t *tcpPeerClient) createClientConn(addr string) (*tcpClientConn, error) {
 func (t *tcpPeerClient) sendMessage(addr string, msg []byte) (err error) {
 	conn, ok := t.getClientConn(addr)
 	if !ok {
-		conn, err = t.createClientConn(addr)
-		if err != nil {
-			log.Error(err)
+		if conn, err = t.createClientConn(addr); err != nil {
 			return
 		}
 		t.wg.Add(1)
 		go conn.handleWrite()
 	}
 
-	return conn.sendMessage(pack(msg))
-
+	err = conn.sendMessage(pack(msg))
+	return
 }
 
 func (t *tcpPeerClient) getClientConn(addr string) (conn *tcpClientConn, ok bool) {
@@ -144,8 +142,9 @@ func newTcpClientConn(addr string, timeout, writeTimeout, keepAlive, chTimeout t
 func (t *tcpClientConn) createConn() error {
 	if t.conn != nil {
 		if err := t.conn.Close(); err != nil {
-			log.Error(err)
+			log.Errorf("Tcp peer client %s connection close error: %v.\n", t.addr, err)
 		}
+		t.conn = nil
 	}
 	d := net.Dialer{
 		Timeout:   t.timeout,
@@ -154,7 +153,7 @@ func (t *tcpClientConn) createConn() error {
 
 	c, err := d.Dial("tcp", t.addr)
 	if err != nil {
-		return err
+		return fmt.Errorf("peer client: dial %s: %v", t.addr, err)
 	}
 	c.(*net.TCPConn).SetKeepAlive(true)
 	t.conn = c
@@ -166,7 +165,7 @@ func (t *tcpClientConn) sendMessage(msg []byte) error {
 	case t.ch <- msg:
 		return nil
 	case <-time.After(t.chTimeout):
-		return errors.New("time out")
+		return fmt.Errorf("peer client: channel full, wait after %v", t.chTimeout)
 	}
 }
 
@@ -174,7 +173,7 @@ func (t *tcpClientConn) handleWrite() {
 	defer func() {
 		if t.conn != nil {
 			if err := t.conn.Close(); err != nil {
-				log.Error(err)
+				log.Errorf("Tcp peer client %s connection close error: %v.\n", t.addr, err)
 			}
 		}
 		if t.closeFunc != nil {
@@ -186,8 +185,9 @@ func (t *tcpClientConn) handleWrite() {
 		t.conn.SetWriteDeadline(time.Now().Add(t.writeTimeout))
 		_, err := t.conn.Write(msg)
 		if err != nil {
+			log.Errorf("Tcp peer client %s write message error: %v.\n", t.addr, err)
 			if err = t.createConn(); err != nil {
-				log.Error(err)
+				log.Errorf("Tcp peer client recreate connection error: %v.\n", err)
 				break
 			}
 		}
