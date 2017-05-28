@@ -11,7 +11,7 @@ import (
 )
 
 var (
-	log = logger.PaxosLogger
+	log = logger.GetLogger("network")
 )
 
 const (
@@ -45,21 +45,24 @@ func ResolveAddr(network, addr string) (net.Addr, error) {
 func AddrToUint64(ip string, port int) (uint64, error) {
 	var n uint64
 	s := strings.Split(ip, ".")
+	if len(s) != 4 {
+		return 0, fmt.Errorf("network: unrecognize ip '%s'", ip)
+	}
 	b0, err := strconv.Atoi(s[0])
 	if err != nil {
-		return n, err
+		return n, fmt.Errorf("network: convert '%s' to node id: %v", ip, err)
 	}
 	b1, err := strconv.Atoi(s[1])
 	if err != nil {
-		return n, err
+		return n, fmt.Errorf("network: convert '%s' to node id: %v", ip, err)
 	}
 	b2, err := strconv.Atoi(s[2])
 	if err != nil {
-		return n, err
+		return n, fmt.Errorf("network: convert '%s' to node id: %v", ip, err)
 	}
 	b3, err := strconv.Atoi(s[3])
 	if err != nil {
-		return n, err
+		return n, fmt.Errorf("network: convert '%s' to node id: %v", ip, err)
 	}
 
 	n |= uint64(b0) << 24
@@ -88,7 +91,7 @@ func (cfg *NetWorkConfig) validate() error {
 	}
 
 	if len(cfg.Token) > maxTokenLen {
-		return fmt.Errorf("token %s length too long", cfg.Token)
+		return fmt.Errorf("network: token %s, length should less than %d", cfg.Token, maxTokenLen)
 	}
 	setToken(cfg.Token)
 	return nil
