@@ -26,9 +26,10 @@ var crcTable = crc32.MakeTable(crc32.Castagnoli)
 type groupConfig struct {
 	nodeID           uint64
 	groupID          uint16
-	members          map[uint64]string
+	//members          map[uint64]string
 	followerMode     bool
 	followNodeID     uint64
+	forceNewMembers  bool
 	enableMemberShip bool
 	enableReplayer   bool
 	sms              []comm.StateMachine
@@ -41,20 +42,18 @@ type groupConfig struct {
 }
 
 func (cfg *groupConfig) validate(st store.Storage) error {
-	if len(cfg.members) <= 0 {
-		return fmt.Errorf("group %d member list is empty", cfg.groupID)
-	}
-
-	if len(cfg.sms) <= 0 {
-		return fmt.Errorf("group %d state machine list is empty", cfg.groupID)
-	}
 	var err error
-	cfg.systemSM, err = newSystemStateMachine(cfg.nodeID, st)
+	cfg.systemSM, err = newSystemStateMachine(cfg.nodeID, cfg.forceNewMembers, st)
 	if err != nil {
 		return err
 	}
-	cfg.systemSM.addNodes(cfg.members)
+	//if cfg.GetClusterID() == 0 && len(cfg.members) <= 0 {
+	//	return errors.New("group: members are empty")
+	//}
 
+	//cfg.systemSM.setMembers(cfg.members)
+
+	cfg.sms = make([]comm.StateMachine, 0)
 	cfg.learnNodes = make(map[uint64]time.Time)
 	cfg.followers = make(map[uint64]time.Time)
 	return nil
@@ -78,6 +77,10 @@ func (cfg *groupConfig) GetGroupID() uint16 {
 
 func (cfg *groupConfig) GetClusterID() uint64 {
 	return cfg.systemSM.getClusterID()
+}
+
+func (cfg *groupConfig) isClusterInitialized() bool {
+	return cfg.systemSM.isInitialized()
 }
 
 func (cfg *groupConfig) GetMajorityCount() int {
@@ -152,6 +155,10 @@ func (cfg *groupConfig) GetFollowers() map[uint64]string {
 	return m
 }
 
+func (cfg *groupConfig) setMembers(members map[uint64]string) {
+	cfg.systemSM.setMembers(members)
+}
+
 func (cfg *groupConfig) GetMembers() map[uint64]string {
 	return cfg.systemSM.getMembers()
 }
@@ -222,13 +229,13 @@ func (g *group) Stop() {
 
 func (g *group) Propose(ctx context.Context, smid uint32, value []byte) (<-chan comm.Result, error) {
 	if len(value) >= maxValueLength {
-		return nil, errors.New("value too large")
+		return nil, errors.New("group: proposal value length exceeded limit")
 	}
 	if g.cfg.FollowerMode() {
-		return nil, errors.New("in follower mode")
+		return nil, errors.New("group: follower mode can't accept proposal")
 	}
 	if !g.cfg.isInMemberShip() {
-		return nil, errors.New("not in members")
+		return nil, errors.New("group: not in membership")
 	}
 	b, err := comm.ObjectToBytes(smid)
 	if err != nil {
@@ -272,7 +279,7 @@ func (g *group) handleNewValue(stopped <-chan struct{}) {
 		}
 		// todo: dont put in for loop, check when start
 		if g.cfg.isEnableMemberShip() &&
-			(g.instance.GetProposerInstanceID() == 0 || g.cfg.GetClusterID() == 0) {
+			(g.instance.GetProposerInstanceID() == 0 || !g.cfg.isClusterInitialized()) {
 			g.newSystemValue()
 		}
 		g.instance.NewValue(ctx)
@@ -295,13 +302,13 @@ func (g *group) newSystemValue() {
 
 	value, err := proto.Marshal(svar)
 	if err != nil {
-		log.Error(err)
+		log.Errorf("Group %d marshal system var error: %v.\n", g.cfg.GetGroupID(), err)
 		return
 	}
 
 	b, err := comm.ObjectToBytes(comm.SystemStateMachineID)
 	if err != nil {
-		log.Error(err)
+		log.Errorf("Group %d convert system smid to bytes error: %v.\n", g.cfg.GetGroupID(), err)
 		return
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), proposeTimeout)
@@ -310,7 +317,20 @@ func (g *group) newSystemValue() {
 	result := make(chan comm.Result)
 	ctx = context.WithValue(ctx, "result", result)
 
-	g.instance.NewValue(ctx)
+	go g.instance.NewValue(ctx)
+	select {
+	case <-ctx.Done():
+		log.Errorf("Group %d propose new system var error: %v.\n", g.cfg.GetGroupID(), ctx.Err())
+	case x := <-result:
+		if x.Err != nil {
+
+		}
+		log.Infof("Group %d propose new system var result: %v.\n", g.cfg.GetGroupID(), x)
+	}
+}
+
+func (g *group) AddStateMachine(sms ...comm.StateMachine) {
+	g.cfg.sms = append(g.cfg.sms, sms...)
 }
 
 func (g *group) addStateMachine(sms ...comm.StateMachine) {
@@ -330,9 +350,9 @@ func (g *group) handleMessage(stopped <-chan struct{}) {
 			return
 		default:
 		}
-		header, err := g.unpack(b)
+		header, b, err := g.unpack(b)
 		if err != nil {
-			log.Error(err)
+			log.Errorf("Group %d unpack message error: %v.\n", g.cfg.GetGroupID(), err)
 			continue
 		}
 
@@ -340,7 +360,7 @@ func (g *group) handleMessage(stopped <-chan struct{}) {
 		case comm.MsgType_Paxos:
 			msg := &comm.PaxosMsg{}
 			if err := proto.Unmarshal(b, msg); err != nil {
-				log.Error(err)
+				log.Errorf("Group %d unmarshal paxos message error: %v.\n", g.cfg.GetGroupID(), err)
 				continue
 			}
 			if !g.checkPaxosMessage(msg) {
@@ -350,7 +370,7 @@ func (g *group) handleMessage(stopped <-chan struct{}) {
 		case comm.MsgType_Checkpoint:
 			msg := &comm.CheckpointMsg{}
 			if err := proto.Unmarshal(b, msg); err != nil {
-				log.Error(err)
+				log.Errorf("Group %d unmarshal checkpoint message error: %v.\n", g.cfg.GetGroupID(), err)
 				continue
 			}
 			g.instance.ReceiveCheckpointMessage(msg)
@@ -358,28 +378,31 @@ func (g *group) handleMessage(stopped <-chan struct{}) {
 	}
 }
 
-func (g *group) unpack(b []byte) (*comm.Header, error) {
-	headerLen, err := comm.BytesToInt(b[:comm.Int32Len])
+func (g *group) unpack(b []byte) (*comm.Header, []byte, error) {
+	//skip group id
+	start := comm.GroupIDLen
+	offset := start + comm.Int32Len
+	headerLen, err := comm.BytesToInt(b[start:offset])
 	if err != nil {
-		return nil, err
+		return nil, nil, fmt.Errorf("convert bytes to header length: %v", err)
 	}
 
 	header := &comm.Header{}
-	start := comm.Int32Len
-	offset := start + headerLen
+	start = offset
+	offset = start + headerLen
 	if err = proto.Unmarshal(b[start:offset], header); err != nil {
-		return nil, err
+		return nil, nil, fmt.Errorf("unmarshal header: %v", err)
 	}
 
-	if !g.checkHeader(header) {
-		return nil, errors.New("check header error")
+	if !g.checkClusterID(header.GetClusterID()) {
+		return nil, nil, errors.New("check header error")
 	}
 
 	start = offset
 	offset = start + comm.Int32Len
 	msgLen, err := comm.BytesToInt(b[start:offset])
 	if err != nil {
-		return nil, err
+		return nil, nil, fmt.Errorf("convert bytes to message length: %v", err)
 	}
 
 	start = offset
@@ -387,20 +410,20 @@ func (g *group) unpack(b []byte) (*comm.Header, error) {
 
 	var checksum uint32
 	if err = comm.BytesToObject(b[offset:], &checksum); err != nil {
-		return nil, err
+		return nil, b[start:offset], fmt.Errorf("convert bytes to checksum: %v", err)
 	}
 
 	if checksum != crc32.Checksum(b[:offset], crcTable) {
-		return nil, errors.New("checksum error")
+		return nil, b[start:offset], errors.New("verify message checksum error")
 	}
-	return header, nil
+	return header, b[start:offset], nil
 }
 
-func (g *group) checkHeader(h *comm.Header) bool {
-	if h.GetClusterID() == 0 || g.cfg.GetClusterID() == 0 {
+func (g *group) checkClusterID(clusterID uint64) bool {
+	if clusterID == 0 || !g.cfg.isClusterInitialized() {
 		return true
 	}
-	if h.GetClusterID() != g.cfg.GetClusterID() {
+	if clusterID != g.cfg.GetClusterID() {
 		return false
 	}
 	return true
@@ -419,8 +442,10 @@ func (g *group) checkPaxosMessage(msg *comm.PaxosMsg) bool {
 		}
 	} else if t == comm.PaxosMsgType_Prepare ||
 		t == comm.PaxosMsgType_Accept {
-		if !g.cfg.isValidNodeID(msg.GetNodeID()) ||
-			g.cfg.GetClusterID() == 0 {
+		if !g.cfg.isClusterInitialized() {
+			g.cfg.addLearnNode(msg.GetNodeID())
+		}
+		if !g.cfg.isValidNodeID(msg.GetNodeID()) {
 			g.cfg.addLearnNode(msg.GetNodeID())
 			return false
 		}
@@ -451,17 +476,21 @@ func (g *group) ContinueCleaner() {
 	g.instance.ContinueCleaner()
 }
 
-func (g *group) SetMaxLogCount(c int) {
+func (g *group) SetMaxLogCount(c int64) {
 	g.instance.SetMaxLogCount(c)
 }
 
+func (g *group) SetMembers(members map[uint64]string) {
+	g.cfg.setMembers(members)
+}
+
 func (g *group) AddMember(ctx context.Context, nodeID uint64, addr string) (<-chan comm.Result, error) {
-	if g.cfg.GetClusterID() == 0 {
-		return nil, errors.New("cluster id zero")
+	if !g.cfg.isClusterInitialized() {
+		return nil, errors.New("group: membership uninitialized")
 	}
 	members, version := g.cfg.getMembersWithVersion()
 	if _, ok := members[nodeID]; ok {
-		return nil, errors.New("node exist")
+		return nil, errors.New("group: member exist")
 	}
 	svar := &comm.SystemVar{
 		ClusterID: proto.Uint64(g.cfg.GetClusterID()),
@@ -483,12 +512,12 @@ func (g *group) AddMember(ctx context.Context, nodeID uint64, addr string) (<-ch
 }
 
 func (g *group) RemoveMember(ctx context.Context, nodeID uint64) (<-chan comm.Result, error) {
-	if g.cfg.GetClusterID() == 0 {
-		return nil, errors.New("cluster id zero")
+	if !g.cfg.isClusterInitialized() {
+		return nil, errors.New("group: membership uninitialized")
 	}
 	members, version := g.cfg.getMembersWithVersion()
 	if _, ok := members[nodeID]; !ok {
-		return nil, errors.New("node not exist")
+		return nil, errors.New("group: member not exist")
 	}
 	svar := &comm.SystemVar{
 		ClusterID: proto.Uint64(g.cfg.GetClusterID()),
@@ -511,15 +540,15 @@ func (g *group) RemoveMember(ctx context.Context, nodeID uint64) (<-chan comm.Re
 }
 
 func (g *group) ChangeMember(ctx context.Context, dst uint64, addr string, src uint64) (<-chan comm.Result, error) {
-	if g.cfg.GetClusterID() == 0 {
-		return nil, errors.New("cluster id zero")
+	if !g.cfg.isClusterInitialized() {
+		return nil, errors.New("group: membership uninitialized")
 	}
 	members, version := g.cfg.getMembersWithVersion()
 	if _, ok := members[dst]; ok {
-		return nil, errors.New("node exist")
+		return nil, errors.New("group: member exist")
 	}
 	if _, ok := members[src]; !ok {
-		return nil, errors.New("node not exist")
+		return nil, errors.New("group: member not exist")
 	}
 	svar := &comm.SystemVar{
 		ClusterID: proto.Uint64(g.cfg.GetClusterID()),
@@ -541,4 +570,8 @@ func (g *group) ChangeMember(ctx context.Context, dst uint64, addr string, src u
 	}
 
 	return g.Propose(ctx, comm.SystemStateMachineID, value)
+}
+
+func (g *group) GetNodeCount() int {
+	return g.cfg.getNodeCount()
 }
