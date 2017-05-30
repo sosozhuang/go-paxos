@@ -41,8 +41,9 @@ to quickly create a Cobra application.`,
 		cfg := &comm.Config{
 			Name: viper.GetString("name"),
 			GroupCount: viper.GetInt("group-count"),
-			Peers: viper.GetString("peers"),
+			Members: viper.GetString("members"),
 			EnableMemberShip: viper.GetBool("membership"),
+			ForceNewMembers: viper.GetBool("force-new-members"),
 			FollowerMode: viper.GetBool("follower-mode"),
 			FollowNode: viper.GetString("follow-node"),
 			ProposeTimeout: viper.GetDuration("propose-timeout") * time.Millisecond,
@@ -68,13 +69,14 @@ to quickly create a Cobra application.`,
 			ClientChanCap: viper.GetInt("client-capacity"),
 
 			EnableElection: viper.GetBool("election"),
-			ElectionTimeout: viper.GetDuration("election-timeout") * time.Millisecond,
+			ElectionTimeout: viper.GetDuration("election-timeout") * time.Second,
 
 			LogDir: viper.GetString("log-dir"),
 			LogOutput: viper.GetString("log-output"),
 			LogLevel: viper.GetString("log-level"),
 
 		}
+
 		err := paxosmain.StartPaxos(cfg)
 		if err != nil {
 			fmt.Fprint(os.Stderr, err)
@@ -97,11 +99,12 @@ func init() {
 
 	flags := RootCmd.Flags()
 	flags.SortFlags = false
-	flags.StringVar(&cfgFile, "config", comm.DefaultConfigFile, "config file (default is $pwd/.paxos.yaml)")
+	flags.StringVar(&cfgFile, "config", comm.DefaultConfigFile, "config file for paxos")
 	flags.String("name", comm.DefaultName, "readable name for this member")
 	flags.Int("group-count", comm.DefaultGroupCount, "number of group")
-	flags.String("peers", comm.DefaultPeers, "list of peers for bootstrapping (comma-separated)")
+	flags.String("members", comm.DefaultMembers, "initial cluster members for bootstrapping (comma-separated)")
 	flags.Bool("membership", comm.DefaultMemberShip, "enable cluster membership")
+	flags.Bool("force-new-members", comm.DefaultForceNewMembers, "force to create new cluster members")
 	flags.Bool("follower-mode", comm.DefaultFollowerMode, "enable follower mode")
 	flags.String("follow-node", comm.DefaultFollowNode, "node address to follow if 'follower-mode' is true")
 	flags.Int("propose-timeout", comm.DefaultProposeTimeout, "time (in milliseconds) for a proposal to timeout")
