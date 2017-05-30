@@ -23,8 +23,9 @@ type Config struct {
 	//node
 	Name             string
 	GroupCount       int
-	Peers            string
+	Members          string
 	EnableMemberShip bool
+	ForceNewMembers  bool
 	FollowerMode     bool
 	FollowNode       string
 	ProposeTimeout   time.Duration
@@ -57,9 +58,9 @@ type Config struct {
 	ElectionTimeout  time.Duration
 
 	//log
-	LogDir    string
-	LogOutput string
-	LogLevel  string
+	LogDir           string
+	LogOutput        string
+	LogLevel         string
 }
 
 func (cfg Config) String() string {
@@ -67,8 +68,9 @@ func (cfg Config) String() string {
 	fmt.Fprintln(x, "[node config]")
 	fmt.Fprintf(x, "name: %s\n", cfg.Name)
 	fmt.Fprintf(x, "group count: %d\n", cfg.GroupCount)
-	fmt.Fprintf(x, "peers: %s\n", cfg.Peers)
+	fmt.Fprintf(x, "members: %s\n", cfg.Members)
 	fmt.Fprintf(x, "enable member ship: %v\n", cfg.EnableMemberShip)
+	fmt.Fprintf(x, "force new members: %v\n", cfg.ForceNewMembers)
 	fmt.Fprintf(x, "follower mode: %v\n", cfg.FollowerMode)
 	fmt.Fprintf(x, "follow node: %s\n", cfg.FollowNode)
 	fmt.Fprintf(x, "propose timeout: %v\n", cfg.ProposeTimeout)
@@ -103,7 +105,7 @@ func (cfg Config) String() string {
 	fmt.Fprintln(x, "[log config]")
 	fmt.Fprintf(x, "log dir: %s\n", cfg.LogDir)
 	fmt.Fprintf(x, "log output: %s\n", cfg.LogOutput)
-	fmt.Fprintf(x, "log level: %s\n", cfg.LogLevel)
+	fmt.Fprintf(x, "log level: %s", cfg.LogLevel)
 	return x.String()
 }
 
@@ -112,8 +114,9 @@ const (
 	//node
 	DefaultName           = "default"
 	DefaultGroupCount     = 10
-	DefaultPeers          = ""
+	DefaultMembers = ""
 	DefaultMemberShip     = true
+	DefaultForceNewMembers = false
 	DefaultFollowerMode   = false
 	DefaultFollowNode     = ""
 	DefaultProposeTimeout = 60 * 1000
@@ -143,7 +146,7 @@ const (
 
 	//election
 	DefaultElection        = true
-	DefaultElectionTimeout = 10 * 1000
+	DefaultElectionTimeout = 10
 
 	//log
 	DefaultLogDir    = "."
