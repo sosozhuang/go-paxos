@@ -93,8 +93,8 @@ func SetupLogger(output, logDir, level string) (err error) {
 	return
 }
 
-func GetLogger(pkg string) Logger {
-	return paxosLogger.WithField("pkg", pkg)
+func GetLogger(m string) Logger {
+	return paxosLogger.WithField("module", m)
 }
 
 func touchLogOutput(output, logDir string, append bool) (*os.File, error) {
