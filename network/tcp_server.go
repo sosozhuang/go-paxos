@@ -18,6 +18,7 @@ type tcpPeerServer struct {
 	listener *net.TCPListener
 	wg       sync.WaitGroup
 	ch       chan []byte
+	stopped chan struct{}
 }
 
 func newTcpPeerServer(receiver comm.Receiver, addr string, timeout, readTimeout time.Duration, cap int) (*tcpPeerServer, error) {
@@ -39,19 +40,21 @@ func newTcpPeerServer(receiver comm.Receiver, addr string, timeout, readTimeout 
 	}, nil
 }
 
-func (t *tcpPeerServer) Start(stopped <-chan struct{}) {
+func (t *tcpPeerServer) start() {
+	t.stopped = make(chan struct{})
 	go t.handleMessage()
-	go t.accept(stopped)
+	go t.accept()
+	log.Debug("Tcp peer server started.")
 }
 
-func (t *tcpPeerServer) accept(stopped <-chan struct{}) {
+func (t *tcpPeerServer) accept() {
 	t.wg.Add(1)
 	defer t.stop()
 	f := func(net.Conn) { t.wg.Done() }
 	delay := time.Millisecond * 5
 	for {
 		select {
-		case <-stopped:
+		case <-t.stopped:
 			return
 		default:
 		}
@@ -67,12 +70,12 @@ func (t *tcpPeerServer) accept(stopped <-chan struct{}) {
 				time.Sleep(delay)
 				continue
 			}
-			log.Errorf("Tcp peer server accept connetions error: %v.\n", err)
+			log.Errorf("Tcp peer server accept connetions error: %v.", err)
 		}
 		t.wg.Add(1)
 		sc := newTcpServerConn(conn, t.readTimeout, t.ch, f)
 		//go sc.receiveMessage()
-		go sc.handleRead(stopped)
+		go sc.handleRead(t.stopped)
 		delay = time.Millisecond * 5
 	}
 }
@@ -86,7 +89,7 @@ func (t *tcpPeerServer) handleMessage() {
 func (t *tcpPeerServer) stop() {
 	if t.listener != nil {
 		if err := t.listener.Close(); err != nil {
-			log.Errorf("Tcp peer server close listener error: %v.\n", err)
+			log.Errorf("Tcp peer server close listener error: %v.", err)
 		}
 		t.listener = nil
 	}
@@ -94,8 +97,12 @@ func (t *tcpPeerServer) stop() {
 }
 
 func (t *tcpPeerServer) Stop() {
+	if t.stopped != nil {
+		close(t.stopped)
+	}
 	t.wg.Wait()
 	close(t.ch)
+	log.Debug("Tcp peer server stopped.")
 }
 
 type tcpServerConn struct {
@@ -131,11 +138,11 @@ func (t *tcpServerConn) handleRead(stopped <-chan struct{}) {
 				if opErr, ok := err.(*net.OpError); ok && opErr.Timeout() {
 					continue
 				}
+				log.Errorf("Tcp peer server connection read error: %v.", err)
 			}
 			if n > 0 {
 				in = unpack(append(in, b[:n]...), t.ch)
 			}
-			log.Errorf("Tcp peer server connection read error: %v.\n", err)
 			return
 		}
 
@@ -145,16 +152,10 @@ func (t *tcpServerConn) handleRead(stopped <-chan struct{}) {
 
 }
 
-//func (t *tcpServerConn) receiveMessage() {
-//	for msg := range t.ch {
-//		t.Node.ReceiveMessage(msg)
-//	}
-//}
-
 func (t *tcpServerConn) close() {
 	if t.conn != nil {
 		if err := t.conn.Close(); err != nil {
-			log.Errorf("Tcp peer server connection close error: %v\n.", err)
+			log.Errorf("Tcp peer server connection close error: %v.", err)
 		}
 		t.conn = nil
 	}
