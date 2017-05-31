@@ -73,25 +73,6 @@ func (t *tcpPeerClient) getClientConn(addr string) (conn *tcpClientConn, ok bool
 	return
 }
 
-//func (t *tcpPeerClient) Start() {
-//	var err error
-//	for r := range t.ch {
-//		conn, ok := t.getClientConn(r.addr)
-//		if ! ok {
-//			conn, err = t.createClientConn(r.addr)
-//			if err != nil {
-//				log.Error(err)
-//				continue
-//			}
-//			go conn.handleWrite()
-//		}
-//
-//		if err = conn.sendMessage(r.message); err != nil {
-//			log.Error(err)
-//		}
-//	}
-//}
-
 func (t *tcpPeerClient) Stop() {
 	//close(t.ch)
 	t.mu.RLock()
@@ -106,6 +87,7 @@ func (t *tcpPeerClient) Stop() {
 		}
 	}
 	t.wg.Wait()
+	log.Debug("Tcp peer client stopped.")
 }
 
 type tcpClientConn struct {
@@ -142,7 +124,7 @@ func newTcpClientConn(addr string, timeout, writeTimeout, keepAlive, chTimeout t
 func (t *tcpClientConn) createConn() error {
 	if t.conn != nil {
 		if err := t.conn.Close(); err != nil {
-			log.Errorf("Tcp peer client %s connection close error: %v.\n", t.addr, err)
+			log.Errorf("Tcp peer client %s connection close error: %v.", t.addr, err)
 		}
 		t.conn = nil
 	}
@@ -173,7 +155,7 @@ func (t *tcpClientConn) handleWrite() {
 	defer func() {
 		if t.conn != nil {
 			if err := t.conn.Close(); err != nil {
-				log.Errorf("Tcp peer client %s connection close error: %v.\n", t.addr, err)
+				log.Errorf("Tcp peer client %s connection close error: %v.", t.addr, err)
 			}
 		}
 		if t.closeFunc != nil {
@@ -185,9 +167,9 @@ func (t *tcpClientConn) handleWrite() {
 		t.conn.SetWriteDeadline(time.Now().Add(t.writeTimeout))
 		_, err := t.conn.Write(msg)
 		if err != nil {
-			log.Errorf("Tcp peer client %s write message error: %v.\n", t.addr, err)
+			log.Errorf("Tcp peer client %s write message error: %v.", t.addr, err)
 			if err = t.createConn(); err != nil {
-				log.Errorf("Tcp peer client recreate connection error: %v.\n", err)
+				log.Errorf("Tcp peer client recreate connection error: %v.", err)
 				break
 			}
 		}
