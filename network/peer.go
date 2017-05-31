@@ -123,9 +123,23 @@ type tcpPeerNetWork struct {
 }
 
 func (t *tcpPeerNetWork) Start(stopped <-chan struct{}) error {
-	t.server.Start(stopped)
-	//go t.client.Start()
+	t.server.start()
+	log.Debug("Tcp peer network started.")
 	return nil
+}
+
+func (t *tcpPeerNetWork) StopServer() {
+	if t.server != nil {
+		t.server.Stop()
+		t.server = nil
+	}
+}
+
+func (t *tcpPeerNetWork) StopClient() {
+	if t.client != nil {
+		t.client.Stop()
+		t.client = nil
+	}
 }
 
 func (t *tcpPeerNetWork) Stop() {
@@ -137,6 +151,7 @@ func (t *tcpPeerNetWork) Stop() {
 		t.client.Stop()
 		t.client = nil
 	}
+	log.Debug("Tcp peer network stopped.")
 }
 
 func (t *tcpPeerNetWork) SendMessage(addr string, message []byte) error {
