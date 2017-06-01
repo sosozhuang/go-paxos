@@ -38,7 +38,6 @@ type Instance interface {
 	getChecksum() uint32
 	getMemberCount() int
 	getMajorityCount() int
-	exitNewValue()
 	NewValue(context.Context)
 	ReceivePaxosMessage(*comm.PaxosMsg)
 	lockCheckpointState() error
@@ -59,7 +58,6 @@ type instance struct {
 	ch       chan *comm.PaxosMsg
 	retries  *msgHeap
 	wg       sync.WaitGroup
-	token    chan struct{}
 }
 
 func NewInstance(groupCfg comm.GroupConfig, sender comm.Sender, st store.Storage) (comm.Instance, error) {
@@ -71,7 +69,6 @@ func NewInstance(groupCfg comm.GroupConfig, sender comm.Sender, st store.Storage
 		ctx:      context.TODO(),
 		ch:       make(chan *comm.PaxosMsg, 10),
 		retries:  &msgHeap{},
-		token:    make(chan struct{}, 1),
 	}
 	heap.Init(i.retries)
 
@@ -228,15 +225,7 @@ func (i *instance) GetReplayer() checkpoint.Replayer {
 }
 
 func (i *instance) IsReadyForNewValue() bool {
-	if !i.learner.isReadyForNewValue() {
-		return false
-	}
-	select {
-	case i.token <- struct{}{}:
-		return true
-	default:
-		return false
-	}
+	return i.learner.isReadyForNewValue()
 }
 
 func (i *instance) GetInstanceID() uint64 {
@@ -247,21 +236,11 @@ func (i *instance) newInstance() {
 	i.proposer.newInstance()
 	i.acceptor.newInstance()
 	i.learner.newInstance()
-	i.exitNewValue()
 }
 
 func (i *instance) NewValue(ctx context.Context) {
 	i.ctx = context.WithValue(ctx, "instance_id", i.proposer.getInstanceID())
 	i.proposer.newValue(i.ctx)
-}
-
-func (i *instance) exitNewValue() {
-	//select {
-	//case <-i.token:
-	//default:
-	//}
-	fmt.Println("exitNewValue",)
-	<- i.token
 }
 
 func (i *instance) AddStateMachine(sms ...comm.StateMachine) {
@@ -371,7 +350,6 @@ func (i *instance) ReceivePaxosMessage(msg *comm.PaxosMsg) {
 		}
 		i.learner.onProposalFinished(msg)
 		if i.learner.isLearned() {
-			//defer i.exitNewValue()
 			if err := i.execute(i.learner.getInstanceID(), i.learner.getValue(), msg.GetNodeID() == i.getNodeID()); err != nil {
 				log.Errorf("Execute state machine error: %v.", err)
 				i.proposer.cancelSkipPrepare()

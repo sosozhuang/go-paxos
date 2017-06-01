@@ -125,22 +125,14 @@ func (p *proposer) newValue(ctx context.Context) {
 	p.prepareTimeout = startPrepareTimeout
 	p.acceptTimeout = startAcceptTimeout
 
-	//done := make(chan struct{})
 	if p.skipPrepare && !p.rejected {
 		go p.accept(ctx)
 	} else {
 		go p.prepare(ctx, p.rejected)
 	}
-	//select {
 	<-ctx.Done()
-	if err := ctx.Err(); err == context.DeadlineExceeded {
-		p.instance.exitNewValue()
-	}
 	p.preparing = false
 	p.accepting = false
-	//case <-done:
-	//	plog.Debugf("Proposal finished.")
-	//}
 }
 
 func (p *proposer) prepare(ctx context.Context, rejected bool) {
