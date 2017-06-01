@@ -18,6 +18,7 @@ import (
 	"github.com/sosozhuang/paxos/comm"
 	"hash/crc32"
 	"fmt"
+	"github.com/sosozhuang/paxos/network"
 )
 
 type Transporter interface {
@@ -48,7 +49,8 @@ func (t *transporter) send(nodeID uint64, msgType comm.MsgType, msg proto.Messag
 
 	addr, ok := t.groupCfg.GetMembers()[nodeID]
 	if !ok {
-		return fmt.Errorf("transporter: can't find node id: %d", nodeID)
+		return t.sender.SendMessage(network.Uint64ToAddr(nodeID), b)
+		//return fmt.Errorf("transporter: can't find node id: %d", nodeID)
 	}
 	return t.sender.SendMessage(addr, b)
 }
@@ -61,33 +63,33 @@ func (t *transporter) pack(msgType comm.MsgType, pb proto.Message) ([]byte, erro
 	}
 	b, err := comm.ObjectToBytes(t.groupCfg.GetGroupID())
 	if err != nil {
-		return nil, fmt.Errorf("transporter: convert group id %d to bytes error: %v",
+		return nil, fmt.Errorf("transporter: convert group id %d to bytes: %v",
 			t.groupCfg.GetGroupID(), err)
 	}
 	h, err := proto.Marshal(header)
 	if err != nil {
-		return nil, fmt.Errorf("transporter: marshal message header error: %v", err)
+		return nil, fmt.Errorf("transporter: marshal message header: %v", err)
 	}
 	l, err := comm.IntToBytes(len(h))
 	if err != nil {
-		return nil, fmt.Errorf("transporter: convert message header length to bytes error: %v", err)
+		return nil, fmt.Errorf("transporter: convert message header length to bytes: %v", err)
 	}
 	b = append(b, l...)
 	b = append(b, h...)
 	m, err := proto.Marshal(pb)
 	if err != nil {
-		return nil, fmt.Errorf("transporter: marshal message error: %v", err)
+		return nil, fmt.Errorf("transporter: marshal message: %v", err)
 	}
 	l, err = comm.IntToBytes(len(m))
 	if err != nil {
-		return nil, fmt.Errorf("transporter: convert message length to bytes error: %v", err)
+		return nil, fmt.Errorf("transporter: convert message length to bytes: %v", err)
 	}
 	b = append(b, l...)
 	b = append(b, m...)
 	checksum := crc32.Checksum(b, crcTable)
 	l, err = comm.ObjectToBytes(checksum)
 	if err != nil {
-		return nil, fmt.Errorf("transporter: convert checksum to bytes error: %v", err)
+		return nil, fmt.Errorf("transporter: convert checksum to bytes: %v", err)
 	}
 	b = append(b, l...)
 	return b, nil
@@ -104,7 +106,7 @@ func (t *transporter) broadcast(msgType comm.MsgType, msg proto.Message) error {
 	for id, addr := range members {
 		if id != t.groupCfg.GetNodeID() {
 			if err = t.sender.SendMessage(addr, b); err != nil {
-				errs = append(errs, fmt.Errorf("send message to %s error: %v", addr, err))
+				errs = append(errs, fmt.Errorf("send message to %s: %v", addr, err))
 			}
 		}
 	}
@@ -124,7 +126,7 @@ func (t *transporter) broadcastToFollowers(msgType comm.MsgType, msg proto.Messa
 	followers := t.groupCfg.GetFollowers()
 	for _, addr := range followers {
 		if err = t.sender.SendMessage(addr, b); err != nil {
-			errs = append(errs, fmt.Errorf("send message to %s error: %v", addr, err))
+			errs = append(errs, fmt.Errorf("send message to %s: %v", addr, err))
 		}
 	}
 	if len(errs) > 0 {
@@ -143,7 +145,7 @@ func (t *transporter) broadcastToLearnNodes(msgType comm.MsgType, msg proto.Mess
 	nodes := t.groupCfg.GetLearnNodes()
 	for _, addr := range nodes {
 		if err = t.sender.SendMessage(addr, b); err != nil {
-			errs = append(errs, fmt.Errorf("send message to %s error: %v", addr, err))
+			errs = append(errs, fmt.Errorf("send message to %s: %v", addr, err))
 		}
 	}
 	if len(errs) > 0 {
