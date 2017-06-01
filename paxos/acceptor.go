@@ -14,17 +14,19 @@
 package paxos
 
 import (
+	"fmt"
 	"github.com/gogo/protobuf/proto"
 	"github.com/sosozhuang/paxos/comm"
 	"github.com/sosozhuang/paxos/logger"
 	"github.com/sosozhuang/paxos/store"
 	"hash/crc32"
 	"sync/atomic"
-	"fmt"
+	"sync"
+	"errors"
 )
 
 var (
-	alog     = logger.AcceptorLogger
+	alog     = logger.GetLogger("acceptor")
 	crcTable = crc32.MakeTable(crc32.Castagnoli)
 )
 
@@ -35,7 +37,8 @@ type Acceptor interface {
 	getInstanceID() uint64
 	setInstanceID(uint64)
 	getPromisedProposalID() uint64
-	getAcceptorState() acceptorState
+	getAcceptorState(*ballot) ([]byte, uint32, error)
+	//getAcceptorState() acceptorState
 	onPrepare(*comm.PaxosMsg)
 	onAccept(*comm.PaxosMsg)
 }
@@ -45,10 +48,10 @@ type acceptor struct {
 	instance   Instance
 	tp         Transporter
 	state      acceptorState
+	mu sync.RWMutex
 }
 
 func newAcceptor(instance Instance, tp Transporter, st store.Storage) Acceptor {
-	alog = logger.AcceptorLogger
 	s := acceptorState{
 		st: st,
 	}
@@ -70,11 +73,14 @@ func (a *acceptor) reset() {
 
 func (a *acceptor) newInstance() {
 	atomic.AddUint64(&a.instanceID, 1)
-	a.state.reset()
+	a.mu.Lock()
+	a.reset()
+	a.mu.Unlock()
 }
 
 func (a *acceptor) getInstanceID() uint64 {
-	return a.instanceID
+	return atomic.LoadUint64(&a.instanceID)
+	//return a.instanceID
 }
 
 func (a *acceptor) setInstanceID(id uint64) {
@@ -85,14 +91,32 @@ func (a *acceptor) getPromisedProposalID() uint64 {
 	return a.state.promisedBallot.proposalID
 }
 
-func (a *acceptor) getAcceptorState() acceptorState {
-	return a.state
+func (a *acceptor) getAcceptorState(b *ballot) (value []byte, checksum uint32, err error) {
+	a.mu.RLock()
+	defer a.mu.RUnlock()
+	if !a.state.acceptedBallot.valid() {
+		err = errors.New("accepted ballot invalid")
+		return
+	}
+	if a.state.acceptedBallot.ne(*b) {
+		err = errors.New("accepted ballot not equal")
+		fmt.Println(a.state.acceptedBallot, *b)
+		return
+	}
+	value = make([]byte, len(a.state.acceptedValue))
+	copy(value, a.state.acceptedValue)
+	checksum = a.state.checksum
+	return
 }
 
+//func (a *acceptor) getAcceptorState() acceptorState {
+//	return a.state
+//}
+
 func (a *acceptor) onPrepare(msg *comm.PaxosMsg) {
-	if msg.GetInstanceID() == a.instanceID+1 {
+	if msg.GetInstanceID() == a.getInstanceID()+1 {
 		newMsg := *msg
-		newMsg.InstanceID = proto.Uint64(a.instanceID)
+		newMsg.InstanceID = proto.Uint64(a.getInstanceID())
 		newMsg.Type = comm.PaxosMsgType_ProposalFinished.Enum()
 		a.instance.ReceivePaxosMessage(&newMsg)
 		return
@@ -100,11 +124,13 @@ func (a *acceptor) onPrepare(msg *comm.PaxosMsg) {
 
 	replyMsg := &comm.PaxosMsg{
 		Type:       comm.PaxosMsgType_PrepareReply.Enum(),
-		InstanceID: proto.Uint64(a.instanceID),
+		InstanceID: proto.Uint64(a.getInstanceID()),
 		NodeID:     proto.Uint64(a.instance.getNodeID()),
 		ProposalID: proto.Uint64(msg.GetProposalID()),
 	}
-	b := ballot{msg.GetProposalID(), msg.GetProposalNodeID()}
+	b := ballot{msg.GetProposalID(), msg.GetNodeID()}
+	a.mu.Lock()
+	defer a.mu.Unlock()
 	if b.ge(a.state.promisedBallot) {
 		replyMsg.PreAcceptID = proto.Uint64(a.state.acceptedBallot.proposalID)
 		replyMsg.PreAcceptNodeID = proto.Uint64(a.state.acceptedBallot.nodeID)
@@ -112,8 +138,8 @@ func (a *acceptor) onPrepare(msg *comm.PaxosMsg) {
 			replyMsg.Value = a.state.acceptedValue
 		}
 		a.state.promisedBallot = b
-		if err := a.state.save(a.instanceID, a.instance.getChecksum()); err != nil {
-			alog.Errorf("Acceptor on prepare save state error: %v.\n", err)
+		if err := a.state.save(a.getInstanceID(), a.instance.getChecksum()); err != nil {
+			alog.Errorf("On prepare save state error: %v.", err)
 			return
 		}
 	} else {
@@ -121,32 +147,39 @@ func (a *acceptor) onPrepare(msg *comm.PaxosMsg) {
 	}
 
 	if err := a.tp.send(msg.GetNodeID(), comm.MsgType_Paxos, replyMsg); err != nil {
-		alog.Errorf("Acceptor on prepare send message error: %v.\n", err)
+		alog.Errorf("On prepare send message error: %v.", err)
 	}
 }
 
 func (a *acceptor) onAccept(msg *comm.PaxosMsg) {
-	if msg.GetInstanceID() == a.instanceID+1 {
+	if msg.GetInstanceID() == a.getInstanceID()+1 {
 		newMsg := *msg
-		newMsg.InstanceID = proto.Uint64(a.instanceID)
+		newMsg.InstanceID = proto.Uint64(a.getInstanceID())
 		newMsg.Type = comm.PaxosMsgType_ProposalFinished.Enum()
 		a.instance.ReceivePaxosMessage(&newMsg)
 		return
 	}
 
+	if len(msg.Value) <= 0 {
+		alog.Errorf("Receive empty value message from node id %d proposal id %d.", msg.GetNodeID(), msg.GetProposalID())
+		return
+	}
+
 	replyMsg := &comm.PaxosMsg{
 		Type:       comm.PaxosMsgType_AcceptReply.Enum(),
-		InstanceID: proto.Uint64(a.instanceID),
+		InstanceID: proto.Uint64(a.getInstanceID()),
 		NodeID:     proto.Uint64(a.instance.getNodeID()),
 		ProposalID: proto.Uint64(msg.GetProposalID()),
 	}
-	b := ballot{msg.GetProposalID(), msg.GetProposalNodeID()}
+	b := ballot{msg.GetProposalID(), msg.GetNodeID()}
+	a.mu.Lock()
+	defer a.mu.Unlock()
 	if b.ge(a.state.promisedBallot) {
 		a.state.promisedBallot = b
 		a.state.acceptedBallot = b
 		a.state.acceptedValue = msg.Value
-		if err := a.state.save(a.instanceID, a.instance.getChecksum()); err != nil {
-			alog.Errorf("Acceptor on accept save state error: %v.\n", err)
+		if err := a.state.save(a.getInstanceID(), a.instance.getChecksum()); err != nil {
+			alog.Errorf("On accept save state error: %v.", err)
 			return
 		}
 	} else {
@@ -154,7 +187,7 @@ func (a *acceptor) onAccept(msg *comm.PaxosMsg) {
 	}
 
 	if err := a.tp.send(msg.GetNodeID(), comm.MsgType_Paxos, replyMsg); err != nil {
-		alog.Errorf("Acceptor on accept send message error: %v.\n", err)
+		alog.Errorf("On accept send message error: %v.", err)
 	}
 }
 
@@ -191,7 +224,7 @@ func (a *acceptorState) save(instanceID uint64, checksum uint32) error {
 
 	b, err := proto.Marshal(state)
 	if err != nil {
-		return fmt.Errorf("marshal state error: %v", err)
+		return fmt.Errorf("marshal state: %v", err)
 	}
 	return a.st.Set(instanceID, b)
 }
@@ -210,7 +243,7 @@ func (a *acceptorState) load() (uint64, error) {
 	}
 	state := &comm.AcceptorStateData{}
 	if err = proto.Unmarshal(b, state); err != nil {
-		return instanceID, fmt.Errorf("unmarshal state error: %v", err)
+		return instanceID, fmt.Errorf("acceptor: unmarshal state: %v", err)
 	}
 	a.promisedBallot.proposalID = state.GetPromisedID()
 	a.promisedBallot.nodeID = state.GetPromisedNodeID()
