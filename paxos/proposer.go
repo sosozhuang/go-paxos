@@ -23,8 +23,21 @@ import (
 	"time"
 )
 
+var (
+	plog = logger.GetLogger("proposer")
+)
+
+const (
+	startPrepareTimeout = time.Second * 2
+	startAcceptTimeout  = time.Second
+	maxPrepareTimeout   = time.Second * 8
+	maxAcceptTimeout    = time.Second * 8
+)
+
 type Reply func(*comm.PaxosMsg)
 type Proposer interface {
+	start(<-chan struct{})
+	stop()
 	newInstance()
 	getInstanceID() uint64
 	setInstanceID(uint64)
@@ -37,6 +50,7 @@ type Proposer interface {
 
 type proposer struct {
 	state                proposerState
+	stopped              <-chan struct{}
 	instance             Instance
 	instanceID           uint64
 	learner              Learner
@@ -46,6 +60,7 @@ type proposer struct {
 	rejected             bool
 	prepareTimeout       time.Duration
 	acceptTimeout        time.Duration
+	receiveNodes         map[uint64]struct{}
 	rejectNodes          map[uint64]struct{}
 	promiseOrAcceptNodes map[uint64]struct{}
 	mu                   sync.Mutex
@@ -54,21 +69,10 @@ type proposer struct {
 	acceptMu             sync.RWMutex
 	acceptReplies        map[uint64]Reply
 	tp                   Transporter
+	wg sync.WaitGroup
 }
 
-var (
-	plog = logger.ProposerLogger
-)
-
-const (
-	startPrepareTimeout = time.Second * 2
-	startAcceptTimeout  = time.Second
-	maxPrepareTimeout   = time.Second * 8
-	maxAcceptTimeout    = time.Second * 8
-)
-
 func newProposer(instance Instance, tp Transporter, learner Learner) Proposer {
-	plog = logger.ProposerLogger
 	state := proposerState{
 		proposalID:     1,
 		lastProposalID: 0,
@@ -77,12 +81,21 @@ func newProposer(instance Instance, tp Transporter, learner Learner) Proposer {
 		state:                state,
 		instance:             instance,
 		learner:              learner,
+		receiveNodes:         make(map[uint64]struct{}),
 		rejectNodes:          make(map[uint64]struct{}),
 		promiseOrAcceptNodes: make(map[uint64]struct{}),
 		prepareReplies:       make(map[uint64]Reply),
 		acceptReplies:        make(map[uint64]Reply),
 		tp:                   tp,
 	}
+}
+
+func (p *proposer) start(stopped <-chan struct{}) {
+	p.stopped = stopped
+}
+
+func (p *proposer) stop() {
+	p.wg.Wait()
 }
 
 func (p *proposer) newInstance() {
@@ -98,7 +111,8 @@ func (p *proposer) setProposalID(proposalID uint64) {
 }
 
 func (p *proposer) getInstanceID() uint64 {
-	return p.instanceID
+	return atomic.LoadUint64(&p.instanceID)
+	//return p.instanceID
 }
 
 func (p *proposer) setInstanceID(id uint64) {
@@ -106,32 +120,32 @@ func (p *proposer) setInstanceID(id uint64) {
 }
 
 func (p *proposer) newValue(ctx context.Context) {
-	value, ok := ctx.Value("value").([]byte)
-	if !ok {
-		plog.Error("Proposer can't get value from context.")
-		return
-	}
-
+	value := ctx.Value("value").([]byte)
 	p.state.setValue(value)
 	p.prepareTimeout = startPrepareTimeout
 	p.acceptTimeout = startAcceptTimeout
 
-	done := make(chan struct{})
+	//done := make(chan struct{})
 	if p.skipPrepare && !p.rejected {
-		p.accept(ctx, done)
+		go p.accept(ctx)
 	} else {
-		p.prepare(ctx, done, p.rejected)
+		go p.prepare(ctx, p.rejected)
 	}
-	select {
-	case <-ctx.Done():
-		p.preparing = false
-		p.accepting = false
-	case <-done:
-		plog.Debugf("Proposal finished.")
+	//select {
+	<-ctx.Done()
+	if err := ctx.Err(); err == context.DeadlineExceeded {
+		p.instance.exitNewValue()
 	}
+	p.preparing = false
+	p.accepting = false
+	//case <-done:
+	//	plog.Debugf("Proposal finished.")
+	//}
 }
 
-func (p *proposer) prepare(ctx context.Context, done chan struct{}, rejected bool) {
+func (p *proposer) prepare(ctx context.Context, rejected bool) {
+	//p.wg.Add(1)
+	//defer p.wg.Done()
 	p.preparing = true
 	p.accepting = false
 	p.skipPrepare = false
@@ -142,18 +156,27 @@ func (p *proposer) prepare(ctx context.Context, done chan struct{}, rejected boo
 		p.state.newState()
 	}
 
+	cid := ctx.Value("instance_id").(uint64)
+	id := p.getInstanceID()
+	if cid != id {
+		plog.Debugf("In prepare, instance id changed from %d to %d.", cid, id)
+		p.instance.NewValue(ctx)
+		return
+	}
+
 	p.startNewRound()
 	msg := &comm.PaxosMsg{
 		Type:       comm.PaxosMsgType_Prepare.Enum(),
-		InstanceID: proto.Uint64(p.instanceID),
+		InstanceID: proto.Uint64(p.getInstanceID()),
 		NodeID:     proto.Uint64(p.instance.getNodeID()),
 		ProposalID: proto.Uint64(p.state.proposalID),
 	}
 
 	select {
 	case <-ctx.Done():
+	case <-p.stopped:
 	default:
-		go p.broadcastPrepareMessage(ctx, done, msg)
+		p.broadcastPrepareMessage(ctx, msg)
 	}
 }
 
@@ -161,7 +184,7 @@ func (p *proposer) getMajorityCount() int {
 	return p.instance.getMajorityCount()
 }
 
-func (p *proposer) broadcastPrepareMessage(ctx context.Context, done chan struct{}, msg *comm.PaxosMsg) {
+func (p *proposer) broadcastPrepareMessage(ctx context.Context, msg *comm.PaxosMsg) {
 	size := p.getMajorityCount()
 	ac, rc := make(chan struct{}, size), make(chan struct{}, size)
 	p.prepareMu.Lock()
@@ -174,6 +197,7 @@ func (p *proposer) broadcastPrepareMessage(ctx context.Context, done chan struct
 		}
 		p.mu.Lock()
 		defer p.mu.Unlock()
+		p.addReceiveNode(msg.GetNodeID())
 		if msg.GetRejectByPromiseID() == 0 {
 			p.addPromiseOrAcceptNode(msg.GetNodeID())
 			b := ballot{msg.GetPreAcceptID(), msg.GetPreAcceptNodeID()}
@@ -185,7 +209,7 @@ func (p *proposer) broadcastPrepareMessage(ctx context.Context, done chan struct
 		}
 		if p.isPassed() {
 			ac <- struct{}{}
-		} else if p.isRejected() {
+		} else if p.isRejected() || p.isAllReceived() {
 			rc <- struct{}{}
 		}
 	}
@@ -199,17 +223,19 @@ func (p *proposer) broadcastPrepareMessage(ctx context.Context, done chan struct
 	pctx, cancel := context.WithTimeout(context.Background(), p.prepareTimeout)
 	defer func() {
 		cancel()
-		close(ac)
-		close(rc)
 		p.prepareMu.Lock()
 		delete(p.prepareReplies, msg.GetProposalID())
 		p.prepareMu.Unlock()
+		close(ac)
+		close(rc)
 	}()
 
+	p.wg.Add(1)
 	go func() {
+		defer p.wg.Done()
 		p.instance.ReceivePaxosMessage(msg)
 		if err := p.tp.broadcast(comm.MsgType_Paxos, msg); err != nil {
-			plog.Errorf("Proposer broadcast prepare message error: %v.\n", err)
+			plog.Errorf("Broadcast prepare message error: %v.", err)
 		}
 	}()
 
@@ -218,36 +244,37 @@ func (p *proposer) broadcastPrepareMessage(ctx context.Context, done chan struct
 		return
 	case <-pctx.Done():
 		//timeout
-		plog.Warning("Proposer prepare message time out.")
+		plog.Warning("Prepare time out.")
 		if p.prepareTimeout < maxPrepareTimeout {
 			p.prepareTimeout *= 2
 		}
-		go p.prepare(ctx, done, p.rejected)
+		p.prepare(ctx, p.rejected)
 	case <-ac:
 		//accepted
-		plog.Debug("Proposer prepare finished, try accept.")
+		plog.Debugf("Prepare finished, continue to accept instance id %d, proposal id %d, node id %d.",
+			msg.GetInstanceID(), msg.GetProposalID(), msg.GetNodeID())
 		p.skipPrepare = true
-		p.accept(ctx, done)
+		p.accept(ctx)
 	case <-rc:
 		//rejected
-		plog.Debug("Proposer prepare rejected, try again.")
-		go func() {
+		plog.Warning("Prepare rejected, try again.")
+		//go func() {
 			time.Sleep(time.Millisecond * 30)
-			p.prepare(ctx, done, p.rejected)
-		}()
+			p.prepare(ctx, p.rejected)
+		//}()
 	}
 }
 
 func (p *proposer) onPrepareReply(msg *comm.PaxosMsg) {
-	if msg.GetInstanceID() != p.instanceID {
-		log.Warningf("Proposer receive prepare reply message instance id %d, current instance id %d.\n",
-			msg.GetInstanceID(), p.instanceID)
+	if msg.GetInstanceID() != p.getInstanceID() {
+		plog.Warningf("Receive prepare reply message instance id %d, current instance id %d.",
+			msg.GetInstanceID(), p.getInstanceID())
 		return
 	}
+
 	p.prepareMu.RLock()
-	f, ok := p.prepareReplies[msg.GetProposalID()]
-	p.prepareMu.RUnlock()
-	if ok {
+	defer p.prepareMu.RUnlock()
+	if f, ok := p.prepareReplies[msg.GetProposalID()]; ok {
 		f(msg)
 	}
 }
@@ -255,8 +282,13 @@ func (p *proposer) onPrepareReply(msg *comm.PaxosMsg) {
 func (p *proposer) startNewRound() {
 	p.mu.Lock()
 	defer p.mu.Unlock()
+	p.receiveNodes = make(map[uint64]struct{})
 	p.rejectNodes = make(map[uint64]struct{})
 	p.promiseOrAcceptNodes = make(map[uint64]struct{})
+}
+
+func (p *proposer) addReceiveNode(id uint64) {
+	p.receiveNodes[id] = struct{}{}
 }
 
 func (p *proposer) addRejectNode(id uint64) {
@@ -275,14 +307,28 @@ func (p *proposer) isRejected() bool {
 	return len(p.rejectNodes) >= p.getMajorityCount()
 }
 
-func (p *proposer) accept(ctx context.Context, done chan struct{}) {
+func (p *proposer) isAllReceived() bool {
+	return len(p.receiveNodes) == p.instance.getMemberCount()
+}
+
+func (p *proposer) accept(ctx context.Context) {
+	//p.wg.Add(1)
+	//defer p.wg.Done()
 	p.preparing = false
 	p.accepting = true
+
+	cid := ctx.Value("instance_id").(uint64)
+	id := p.getInstanceID()
+	if cid != id {
+		plog.Debugf("In accept, instance id changed from %d to %d.", cid, id)
+		p.instance.NewValue(ctx)
+		return
+	}
 
 	p.startNewRound()
 	msg := &comm.PaxosMsg{
 		Type:       comm.PaxosMsgType_Accept.Enum(),
-		InstanceID: proto.Uint64(p.instanceID),
+		InstanceID: proto.Uint64(p.getInstanceID()),
 		NodeID:     proto.Uint64(p.instance.getNodeID()),
 		ProposalID: proto.Uint64(p.state.proposalID),
 		Value:      p.state.value,
@@ -291,12 +337,13 @@ func (p *proposer) accept(ctx context.Context, done chan struct{}) {
 
 	select {
 	case <-ctx.Done():
+	case <-p.stopped:
 	default:
-		go p.broadcastAcceptMessage(ctx, done, msg)
+		p.broadcastAcceptMessage(ctx, msg)
 	}
 }
 
-func (p *proposer) broadcastAcceptMessage(ctx context.Context, done chan struct{}, msg *comm.PaxosMsg) {
+func (p *proposer) broadcastAcceptMessage(ctx context.Context, msg *comm.PaxosMsg) {
 	size := p.getMajorityCount()
 	ac, rc := make(chan struct{}, size), make(chan struct{}, size)
 	p.acceptMu.Lock()
@@ -309,6 +356,7 @@ func (p *proposer) broadcastAcceptMessage(ctx context.Context, done chan struct{
 		}
 		p.mu.Lock()
 		defer p.mu.Unlock()
+		p.addReceiveNode(msg.GetNodeID())
 		if msg.GetRejectByPromiseID() == 0 {
 			p.addPromiseOrAcceptNode(msg.GetNodeID())
 		} else {
@@ -318,31 +366,32 @@ func (p *proposer) broadcastAcceptMessage(ctx context.Context, done chan struct{
 		}
 		if p.isPassed() {
 			ac <- struct{}{}
-		} else if p.isRejected() {
+		} else if p.isRejected() || p.isAllReceived() {
 			rc <- struct{}{}
 		}
 	}
 	p.acceptMu.Unlock()
 
 	if deadline, ok := ctx.Deadline(); ok {
-		d := deadline.Sub(time.Now())
-		if d < p.acceptTimeout {
+		if d := deadline.Sub(time.Now()); d < p.acceptTimeout {
 			p.acceptTimeout = d
 		}
 	}
 	pctx, cancel := context.WithTimeout(context.Background(), p.acceptTimeout)
 	defer func() {
 		cancel()
-		close(ac)
-		close(rc)
 		p.acceptMu.Lock()
 		delete(p.acceptReplies, msg.GetProposalID())
 		p.acceptMu.Unlock()
+		close(ac)
+		close(rc)
 	}()
 
+	p.wg.Add(1)
 	go func() {
+		defer p.wg.Done()
 		if err := p.tp.broadcast(comm.MsgType_Paxos, msg); err != nil {
-			plog.Errorf("Proposer broadcast accept message error: %v.\n", err)
+			plog.Errorf("Broadcast accept message error: %v.", err)
 		}
 		p.instance.ReceivePaxosMessage(msg)
 	}()
@@ -352,44 +401,41 @@ func (p *proposer) broadcastAcceptMessage(ctx context.Context, done chan struct{
 		return
 	case <-pctx.Done():
 		//timeout
-		plog.Warning("Proposer accept message time out.")
+		plog.Warning("Accept time out.")
+		if p.prepareTimeout < maxPrepareTimeout {
+			p.prepareTimeout *= 2
+		}
 		if p.acceptTimeout < maxAcceptTimeout {
 			p.acceptTimeout *= 2
 		}
-		if deadline, ok := ctx.Deadline(); ok {
-			d := deadline.Sub(time.Now())
-			if d < p.acceptTimeout {
-				p.acceptTimeout = d
-			}
-		}
-		go p.prepare(ctx, done, p.rejected)
+		p.prepare(ctx, p.rejected)
 	case <-ac:
 		//accept
-		plog.Debug("Proposer accept finished, try to learn.")
+		plog.Debugf("Accept finished, continue to learn instance %d, proposal id %d, node id %d.",
+			msg.GetInstanceID(), msg.GetProposalID(), msg.GetNodeID())
 		p.accepting = false
-		p.learner.proposalFinished(p.instanceID, msg.GetProposalID())
-		close(done)
+		p.learner.proposalFinished(p.getInstanceID(), msg.GetProposalID())
+		//close(done)
 	case <-rc:
 		//reject
-		plog.Debug("Proposer accept rejected, try prepare again.")
-		go func() {
+		plog.Warning("Accept rejected, try prepare again.")
+		//go func() {
 			time.Sleep(time.Millisecond * 30)
-			p.prepare(ctx, done, p.rejected)
-		}()
+			p.prepare(ctx, p.rejected)
+		//}()
 	}
 }
 
 func (p *proposer) onAcceptReply(msg *comm.PaxosMsg) {
-	if msg.GetInstanceID() != p.instanceID {
-		log.Warningf("Proposer receive accept reply message instance id %d, current instance id %d.\n",
-			msg.GetInstanceID(), p.instanceID)
+	if msg.GetInstanceID() != p.getInstanceID() {
+		plog.Warningf("Receive accept reply message instance id %d, current instance id %d.",
+			msg.GetInstanceID(), p.getInstanceID())
 		return
 	}
-	p.acceptMu.RLock()
-	f, ok := p.acceptReplies[msg.GetProposalID()]
-	p.acceptMu.RUnlock()
 
-	if ok {
+	p.acceptMu.RLock()
+	defer p.acceptMu.RUnlock()
+	if f, ok := p.acceptReplies[msg.GetProposalID()]; ok {
 		f(msg)
 	}
 }
