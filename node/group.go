@@ -3,6 +3,7 @@ package node
 import (
 	"context"
 	"errors"
+	"fmt"
 	"github.com/gogo/protobuf/proto"
 	"github.com/sosozhuang/paxos/comm"
 	"github.com/sosozhuang/paxos/network"
@@ -12,7 +13,6 @@ import (
 	"math/rand"
 	"sync"
 	"time"
-	"fmt"
 )
 
 const (
@@ -24,8 +24,8 @@ const (
 var crcTable = crc32.MakeTable(crc32.Castagnoli)
 
 type groupConfig struct {
-	nodeID           uint64
-	groupID          uint16
+	nodeID  uint64
+	groupID uint16
 	//members          map[uint64]string
 	followerMode     bool
 	followNodeID     uint64
@@ -91,8 +91,8 @@ func (cfg *groupConfig) isValidNodeID(nodeID uint64) bool {
 	return cfg.systemSM.isValidNodeID(nodeID)
 }
 
-func (cfg *groupConfig) getNodeCount() int {
-	return cfg.systemSM.getNodeCount()
+func (cfg *groupConfig) GetMemberCount() int {
+	return cfg.systemSM.getMemberCount()
 }
 
 func (cfg *groupConfig) getMembersWithVersion() (map[uint64]string, uint64) {
@@ -212,11 +212,18 @@ func (g *group) Start(ctx context.Context, stopped <-chan struct{}) error {
 	case <-ctx.Done():
 		return ctx.Err()
 	default:
-		g.addStateMachine(g.cfg.masterSM, g.cfg.systemSM)
+		if g.cfg.masterSM != nil {
+			g.addStateMachine(g.cfg.masterSM)
+		}
+		g.addStateMachine(g.cfg.systemSM)
 		g.addStateMachine(g.cfg.sms...)
 		go g.handleNewValue(stopped)
 		go g.handleMessage(stopped)
-		return g.instance.Start(ctx, stopped)
+		if err := g.instance.Start(ctx, stopped); err != nil {
+			return err
+		}
+		log.Debugf("Group %d started.", g.cfg.GetGroupID())
+		return nil
 	}
 }
 
@@ -225,6 +232,7 @@ func (g *group) Stop() {
 	close(g.msgCh)
 	g.instance.Stop()
 	g.wg.Wait()
+	log.Debugf("Group %d stopped.", g.cfg.GetGroupID())
 }
 
 func (g *group) Propose(ctx context.Context, smid uint32, value []byte) (<-chan comm.Result, error) {
@@ -237,6 +245,7 @@ func (g *group) Propose(ctx context.Context, smid uint32, value []byte) (<-chan 
 	if !g.cfg.isInMemberShip() {
 		return nil, errors.New("group: not in membership")
 	}
+
 	b, err := comm.ObjectToBytes(smid)
 	if err != nil {
 		return nil, err
@@ -244,12 +253,18 @@ func (g *group) Propose(ctx context.Context, smid uint32, value []byte) (<-chan 
 	ctx = context.WithValue(ctx, "value", append(b, value...))
 	result := make(chan comm.Result)
 	ctx = context.WithValue(ctx, "result", result)
-	select {
-	case g.proposeCh <- ctx:
-		return result, nil
-	case <-ctx.Done():
-		return nil, ctx.Err()
+	for i := 0; i < 3; i++ {
+		select {
+		case g.proposeCh <- ctx:
+			return result, nil
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		default:
+			time.Sleep(time.Millisecond * 10)
+			continue
+		}
 	}
+	return nil, errors.New("proposal channel full")
 }
 
 func (g *group) BatchPropose(context.Context, uint32, []byte, uint32) (<-chan comm.Result, error) {
@@ -258,7 +273,10 @@ func (g *group) BatchPropose(context.Context, uint32, []byte, uint32) (<-chan co
 
 func (g *group) handleNewValue(stopped <-chan struct{}) {
 	g.wg.Add(1)
-	defer g.wg.Done()
+	defer func() {
+		g.wg.Done()
+		log.Debugf("Group %d handleNewValue stopped.", g.cfg.GetGroupID())
+	}()
 	for {
 		select {
 		case <-stopped:
@@ -266,7 +284,7 @@ func (g *group) handleNewValue(stopped <-chan struct{}) {
 		default:
 		}
 		if !g.instance.IsReadyForNewValue() {
-			time.Sleep(time.Millisecond * 50)
+			time.Sleep(time.Millisecond * 10)
 			continue
 		}
 
@@ -277,7 +295,6 @@ func (g *group) handleNewValue(stopped <-chan struct{}) {
 		if d, ok := ctx.Deadline(); ok && d.Before(time.Now()) {
 			continue
 		}
-		// todo: dont put in for loop, check when start
 		if g.cfg.isEnableMemberShip() &&
 			(g.instance.GetProposerInstanceID() == 0 || !g.cfg.isClusterInitialized()) {
 			g.newSystemValue()
@@ -293,7 +310,12 @@ func (g *group) newSystemValue() {
 		ClusterID: proto.Uint64(g.cfg.GetNodeID() ^ uint64(rand.Uint32()) + uint64(rand.Uint32())),
 		Version:   proto.Uint64(version),
 	}
-	svar.Nodes = make([]*comm.PaxosNodeInfo, g.cfg.getNodeCount())
+	//if g.cfg.forceNewMembers {
+	//	svar.ClusterID = proto.Uint64(g.cfg.GetClusterID())
+	//} else {
+	//	svar.ClusterID = proto.Uint64(g.cfg.GetNodeID() ^ uint64(rand.Uint32()))
+	//}
+	svar.Nodes = make([]*comm.PaxosNodeInfo, g.cfg.GetMemberCount())
 	i := 0
 	for k, v := range members {
 		svar.Nodes[i] = &comm.PaxosNodeInfo{NodeID: proto.Uint64(uint64(k)), Addr: proto.String(v)}
@@ -302,16 +324,16 @@ func (g *group) newSystemValue() {
 
 	value, err := proto.Marshal(svar)
 	if err != nil {
-		log.Errorf("Group %d marshal system var error: %v.\n", g.cfg.GetGroupID(), err)
+		log.Errorf("Group %d marshal system var error: %v.", g.cfg.GetGroupID(), err)
 		return
 	}
 
 	b, err := comm.ObjectToBytes(comm.SystemStateMachineID)
 	if err != nil {
-		log.Errorf("Group %d convert system smid to bytes error: %v.\n", g.cfg.GetGroupID(), err)
+		log.Errorf("Group %d convert system smid to bytes error: %v.", g.cfg.GetGroupID(), err)
 		return
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), proposeTimeout)
+	ctx, cancel := context.WithTimeout(context.Background(), maxProposeTimeout)
 	defer cancel()
 	ctx = context.WithValue(ctx, "value", append(b, value...))
 	result := make(chan comm.Result)
@@ -320,12 +342,13 @@ func (g *group) newSystemValue() {
 	go g.instance.NewValue(ctx)
 	select {
 	case <-ctx.Done():
-		log.Errorf("Group %d propose new system var error: %v.\n", g.cfg.GetGroupID(), ctx.Err())
+		log.Errorf("Group %d propose new system var error: %v.", g.cfg.GetGroupID(), ctx.Err())
 	case x := <-result:
 		if x.Err != nil {
-
+			log.Errorf("Group %d propose new system var error: %v.", g.cfg.GetGroupID(), x.Err)
+		} else {
+			log.Infof("Group %d propose new system var result: %v.", g.cfg.GetGroupID(), x)
 		}
-		log.Infof("Group %d propose new system var result: %v.\n", g.cfg.GetGroupID(), x)
 	}
 }
 
@@ -343,7 +366,10 @@ func (g *group) ReceiveMessage(b []byte) {
 
 func (g *group) handleMessage(stopped <-chan struct{}) {
 	g.wg.Add(1)
-	defer g.wg.Done()
+	defer func() {
+		g.wg.Done()
+		log.Debugf("Group %d handleMessage stopped.", g.cfg.GetGroupID())
+	}()
 	for b := range g.msgCh {
 		select {
 		case <-stopped:
@@ -352,7 +378,7 @@ func (g *group) handleMessage(stopped <-chan struct{}) {
 		}
 		header, b, err := g.unpack(b)
 		if err != nil {
-			log.Errorf("Group %d unpack message error: %v.\n", g.cfg.GetGroupID(), err)
+			log.Errorf("Group %d unpack message error: %v.", g.cfg.GetGroupID(), err)
 			continue
 		}
 
@@ -360,7 +386,7 @@ func (g *group) handleMessage(stopped <-chan struct{}) {
 		case comm.MsgType_Paxos:
 			msg := &comm.PaxosMsg{}
 			if err := proto.Unmarshal(b, msg); err != nil {
-				log.Errorf("Group %d unmarshal paxos message error: %v.\n", g.cfg.GetGroupID(), err)
+				log.Errorf("Group %d unmarshal paxos message error: %v.", g.cfg.GetGroupID(), err)
 				continue
 			}
 			if !g.checkPaxosMessage(msg) {
@@ -370,7 +396,7 @@ func (g *group) handleMessage(stopped <-chan struct{}) {
 		case comm.MsgType_Checkpoint:
 			msg := &comm.CheckpointMsg{}
 			if err := proto.Unmarshal(b, msg); err != nil {
-				log.Errorf("Group %d unmarshal checkpoint message error: %v.\n", g.cfg.GetGroupID(), err)
+				log.Errorf("Group %d unmarshal checkpoint message error: %v.", g.cfg.GetGroupID(), err)
 				continue
 			}
 			g.instance.ReceiveCheckpointMessage(msg)
@@ -395,7 +421,7 @@ func (g *group) unpack(b []byte) (*comm.Header, []byte, error) {
 	}
 
 	if !g.checkClusterID(header.GetClusterID()) {
-		return nil, nil, errors.New("check header error")
+		return nil, nil, errors.New("cluster id error")
 	}
 
 	start = offset
@@ -420,6 +446,9 @@ func (g *group) unpack(b []byte) (*comm.Header, []byte, error) {
 }
 
 func (g *group) checkClusterID(clusterID uint64) bool {
+	if g.cfg.forceNewMembers {
+		return true
+	}
 	if clusterID == 0 || !g.cfg.isClusterInitialized() {
 		return true
 	}
@@ -496,7 +525,7 @@ func (g *group) AddMember(ctx context.Context, nodeID uint64, addr string) (<-ch
 		ClusterID: proto.Uint64(g.cfg.GetClusterID()),
 		Version:   proto.Uint64(version),
 	}
-	svar.Nodes = make([]*comm.PaxosNodeInfo, g.cfg.getNodeCount()+1)
+	svar.Nodes = make([]*comm.PaxosNodeInfo, g.cfg.GetMemberCount()+1)
 	i := 0
 	for k, v := range members {
 		svar.Nodes[i] = &comm.PaxosNodeInfo{NodeID: proto.Uint64(uint64(k)), Addr: proto.String(v)}
@@ -523,7 +552,7 @@ func (g *group) RemoveMember(ctx context.Context, nodeID uint64) (<-chan comm.Re
 		ClusterID: proto.Uint64(g.cfg.GetClusterID()),
 		Version:   proto.Uint64(version),
 	}
-	svar.Nodes = make([]*comm.PaxosNodeInfo, g.cfg.getNodeCount()-1)
+	svar.Nodes = make([]*comm.PaxosNodeInfo, g.cfg.GetMemberCount()-1)
 	i := 0
 	for k, v := range members {
 		if k != nodeID {
@@ -554,7 +583,7 @@ func (g *group) ChangeMember(ctx context.Context, dst uint64, addr string, src u
 		ClusterID: proto.Uint64(g.cfg.GetClusterID()),
 		Version:   proto.Uint64(version),
 	}
-	svar.Nodes = make([]*comm.PaxosNodeInfo, g.cfg.getNodeCount())
+	svar.Nodes = make([]*comm.PaxosNodeInfo, g.cfg.GetMemberCount())
 	i := 0
 	for k, v := range members {
 		if k != src {
@@ -573,5 +602,5 @@ func (g *group) ChangeMember(ctx context.Context, dst uint64, addr string, src u
 }
 
 func (g *group) GetNodeCount() int {
-	return g.cfg.getNodeCount()
+	return g.cfg.GetMemberCount()
 }
