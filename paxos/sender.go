@@ -16,7 +16,6 @@ package paxos
 import (
 	"errors"
 	"github.com/sosozhuang/paxos/checkpoint"
-	"hash/crc32"
 	"io"
 	"os"
 	"path"
@@ -24,6 +23,7 @@ import (
 	"sync/atomic"
 	"syscall"
 	"time"
+	"github.com/sosozhuang/paxos/util"
 )
 
 type Sender interface {
@@ -180,7 +180,7 @@ func (s *checkpointSender) sendFile(smid uint32, instanceID uint64, name string)
 
 func (s *checkpointSender) sendBytes(smid uint32, checkpointInstanceID uint64, path string,
 	offset int64, b []byte) error {
-	checksum := crc32.Checksum(b, crcTable)
+	checksum := util.Checksum(b)
 	for {
 		if !s.checkAck(s.sequence) {
 			return errors.New("ack timeout")

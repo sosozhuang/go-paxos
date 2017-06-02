@@ -21,7 +21,6 @@ import (
 	"github.com/sosozhuang/paxos/logger"
 	"github.com/sosozhuang/paxos/store"
 	"github.com/sosozhuang/paxos/util"
-	"hash/crc32"
 	"math"
 	"sync"
 	"sync/atomic"
@@ -562,11 +561,11 @@ func (l *learnerState) learn(value []byte, checksum uint32) {
 	l.checksum = checksum
 }
 
-func (l *learnerState) learnAndSave(instanceID uint64, b ballot, value []byte, checksum uint32) error {
-	if instanceID > 0 && checksum == 0 {
+func (l *learnerState) learnAndSave(instanceID uint64, b ballot, value []byte, crc uint32) error {
+	if instanceID > 0 && crc == 0 {
 		l.checksum = 0
 	} else if len(l.value) > 0 {
-		l.checksum = crc32.Update(checksum, crcTable, l.value)
+		l.checksum = util.UpdateChecksum(crc, l.value)
 	}
 	state := &comm.AcceptorStateData{
 		InstanceID:     proto.Uint64(instanceID),

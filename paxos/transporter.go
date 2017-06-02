@@ -16,9 +16,9 @@ package paxos
 import (
 	"github.com/gogo/protobuf/proto"
 	"github.com/sosozhuang/paxos/comm"
-	"hash/crc32"
 	"fmt"
 	"github.com/sosozhuang/paxos/network"
+	"github.com/sosozhuang/paxos/util"
 )
 
 type Transporter interface {
@@ -86,7 +86,7 @@ func (t *transporter) pack(msgType comm.MsgType, pb proto.Message) ([]byte, erro
 	}
 	b = append(b, l...)
 	b = append(b, m...)
-	checksum := crc32.Checksum(b, crcTable)
+	checksum := util.Checksum(b)
 	l, err = comm.ObjectToBytes(checksum)
 	if err != nil {
 		return nil, fmt.Errorf("transporter: convert checksum to bytes: %v", err)

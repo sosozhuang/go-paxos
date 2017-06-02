@@ -148,14 +148,6 @@ func (p *proposer) prepare(ctx context.Context, rejected bool) {
 		p.state.newState()
 	}
 
-	cid := ctx.Value("instance_id").(uint64)
-	id := p.getInstanceID()
-	if cid != id {
-		plog.Debugf("In prepare, instance id changed from %d to %d.", cid, id)
-		p.instance.NewValue(ctx)
-		return
-	}
-
 	p.startNewRound()
 	msg := &comm.PaxosMsg{
 		Type:       comm.PaxosMsgType_Prepare.Enum(),
@@ -221,6 +213,13 @@ func (p *proposer) broadcastPrepareMessage(ctx context.Context, msg *comm.PaxosM
 		close(ac)
 		close(rc)
 	}()
+
+	cid := ctx.Value("instance_id").(uint64)
+	if cid != msg.GetInstanceID() {
+		plog.Debugf("In prepare, instance id changed from %d to %d.", cid, msg.GetInstanceID())
+		p.instance.NewValue(ctx)
+		return
+	}
 
 	p.wg.Add(1)
 	go func() {
@@ -309,14 +308,6 @@ func (p *proposer) accept(ctx context.Context) {
 	p.preparing = false
 	p.accepting = true
 
-	cid := ctx.Value("instance_id").(uint64)
-	id := p.getInstanceID()
-	if cid != id {
-		plog.Debugf("In accept, instance id changed from %d to %d.", cid, id)
-		p.instance.NewValue(ctx)
-		return
-	}
-
 	p.startNewRound()
 	msg := &comm.PaxosMsg{
 		Type:       comm.PaxosMsgType_Accept.Enum(),
@@ -378,6 +369,13 @@ func (p *proposer) broadcastAcceptMessage(ctx context.Context, msg *comm.PaxosMs
 		close(ac)
 		close(rc)
 	}()
+
+	cid := ctx.Value("instance_id").(uint64)
+	if cid != msg.GetInstanceID() {
+		plog.Debugf("In accept, instance id changed from %d to %d.", cid, msg.GetInstanceID())
+		p.instance.NewValue(ctx)
+		return
+	}
 
 	p.wg.Add(1)
 	go func() {

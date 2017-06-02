@@ -19,15 +19,14 @@ import (
 	"github.com/sosozhuang/paxos/comm"
 	"github.com/sosozhuang/paxos/logger"
 	"github.com/sosozhuang/paxos/store"
-	"hash/crc32"
 	"sync/atomic"
 	"sync"
 	"errors"
+	"github.com/sosozhuang/paxos/util"
 )
 
 var (
 	alog     = logger.GetLogger("acceptor")
-	crcTable = crc32.MakeTable(crc32.Castagnoli)
 )
 
 type Acceptor interface {
@@ -134,7 +133,7 @@ func (a *acceptor) onPrepare(msg *comm.PaxosMsg) {
 	if b.ge(a.state.promisedBallot) {
 		replyMsg.PreAcceptID = proto.Uint64(a.state.acceptedBallot.proposalID)
 		replyMsg.PreAcceptNodeID = proto.Uint64(a.state.acceptedBallot.nodeID)
-		if a.state.acceptedBallot.proposalID > 0 {
+		if a.state.acceptedBallot.valid() {
 			replyMsg.Value = a.state.acceptedValue
 		}
 		a.state.promisedBallot = b
@@ -205,11 +204,11 @@ func (a *acceptorState) reset() {
 	a.checksum = 0
 }
 
-func (a *acceptorState) save(instanceID uint64, checksum uint32) error {
-	if instanceID > 0 && checksum == 0 {
+func (a *acceptorState) save(instanceID uint64, crc uint32) error {
+	if instanceID > 0 && crc == 0 {
 		a.checksum = 0
 	} else if len(a.acceptedValue) > 0 {
-		a.checksum = crc32.Update(checksum, crcTable, a.acceptedValue)
+		a.checksum = util.UpdateChecksum(crc, a.acceptedValue)
 	}
 
 	state := &comm.AcceptorStateData{
