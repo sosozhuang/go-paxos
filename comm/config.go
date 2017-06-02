@@ -112,44 +112,44 @@ func (cfg Config) String() string {
 const (
 	DefaultConfigFile = ""
 	//node
-	DefaultName           = "default"
-	DefaultGroupCount     = 10
+	DefaultName = "default"
+	DefaultGroupCount = 10
 	DefaultMembers = ""
-	DefaultMemberShip     = true
+	DefaultMemberShip = true
 	DefaultForceNewMembers = false
-	DefaultFollowerMode   = false
-	DefaultFollowNode     = ""
-	DefaultProposeTimeout = 60 * 1000
-	DefaultLogCount       = 10000
+	DefaultFollowerMode = false
+	DefaultFollowNode = ""
+	DefaultProposeTimeout = 10 * 1000
 
 	//storage
-	DefaultDataDir    = ""
-	DefaultStorage    = "rocksdb"
-	DefaultSync       = true
+	DefaultDataDir = ""
+	DefaultStorage = "rocksdb"
+	DefaultSync = true
 	DefaultSyncPeriod = 10000
-	DefaultSyncCount  = 100
+	DefaultSyncCount = 100
 	DefaultDisableWAL = false
+	DefaultMaxLogCount = 10000
 
 	//network
-	DefaultToken           = "paxos"
-	DefaultListenMode      = "tcp"
-	DefaultAdvertiseIP     = ""
-	DefaultListenIP        = ""
-	DefaultListenPort      = 17524
-	DefaultListenTimeout   = 3 * 1000
-	DefaultDialTimeout     = 30 * 1000
-	DefaultWriteTimeout    = 3 * 1000
-	DefaultReadTimeout     = 3 * 1000
+	DefaultToken = "paxos"
+	DefaultListenMode = "tcp"
+	DefaultAdvertiseIP = ""
+	DefaultListenIP = ""
+	DefaultListenPort = 17524
+	DefaultListenTimeout = 3 * 1000
+	DefaultDialTimeout = 30 * 1000
+	DefaultWriteTimeout = 3 * 1000
+	DefaultReadTimeout = 3 * 1000
 	DefaultKeepAlivePeriod = 60 * 60
-	DefaultServerCap       = 100
-	DefaultClientCap       = 100
+	DefaultServerCap = 100
+	DefaultClientCap = 100
 
 	//election
-	DefaultElection        = true
+	DefaultElection = true
 	DefaultElectionTimeout = 10
 
 	//log
-	DefaultLogDir    = "."
+	DefaultLogDir = "."
 	DefaultLogOutput = ""
-	DefaultLogLevel  = "INFO"
+	DefaultLogLevel = "INFO"
 )
