@@ -14,17 +14,10 @@
 package comm
 
 import (
-	"bytes"
 	"context"
-	"encoding/binary"
 	"math"
 	"time"
 	"unsafe"
-	"hash/crc32"
-)
-
-var (
-	CRCTable = crc32.MakeTable(crc32.Castagnoli)
 )
 
 const (
@@ -87,37 +80,6 @@ type StateMachine interface {
 type Result struct {
 	Ret interface{}
 	Err error
-}
-
-func ObjectToBytes(i interface{}) ([]byte, error) {
-	bytesBuffer := bytes.NewBuffer([]byte{})
-	if err := binary.Write(bytesBuffer, binary.BigEndian, i); err != nil {
-		return nil, err
-	}
-	return bytesBuffer.Bytes(), nil
-}
-
-func BytesToObject(b []byte, i interface{}) error {
-	bytesBuffer := bytes.NewBuffer(b)
-	return binary.Read(bytesBuffer, binary.BigEndian, i)
-}
-
-func IntToBytes(n int) ([]byte, error) {
-	d := int32(n)
-	bytesBuffer := bytes.NewBuffer([]byte{})
-	if err := binary.Write(bytesBuffer, binary.BigEndian, d); err != nil {
-		return nil, err
-	}
-	return bytesBuffer.Bytes(), nil
-}
-
-func BytesToInt(b []byte) (int, error) {
-	bytesBuffer := bytes.NewBuffer(b)
-	var n int32
-	if err := binary.Read(bytesBuffer, binary.BigEndian, &n); err != nil {
-		return 0, err
-	}
-	return int(n), nil
 }
 
 type GroupConfig interface {
