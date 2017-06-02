@@ -2,6 +2,7 @@ package network
 
 import (
 	"github.com/sosozhuang/paxos/comm"
+	"github.com/sosozhuang/paxos/util"
 )
 
 var (
@@ -18,7 +19,7 @@ func setToken(t string) {
 }
 
 func pack(msg []byte) []byte {
-	b, err := comm.IntToBytes(len(msg))
+	b, err := util.IntToBytes(len(msg))
 	if err != nil {
 		return msg
 	}
@@ -38,7 +39,7 @@ func unpack(buffer []byte, ch chan<- []byte) []byte {
 		if string(buffer[i:offset]) == token {
 			start = offset
 			offset = start+comm.Int32Len
-			msgLen, err := comm.BytesToInt(buffer[start : offset])
+			msgLen, err := util.BytesToInt(buffer[start : offset])
 			if err != nil {
 				break
 			}
