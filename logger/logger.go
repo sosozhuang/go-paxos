@@ -56,13 +56,13 @@ var (
 
 func NewLogger(output, logDir, level string) (Logger, error) {
 	l := logrus.New()
-	if err := setupLogger(l, output, logDir, level); err != nil {
+	if err := setupLogger(l, output, logDir, level, true); err != nil {
 		return nil, err
 	}
 	return l, nil
 }
 
-func setupLogger(l *logrus.Logger, output, logDir, level string) error {
+func setupLogger(l *logrus.Logger, output, logDir, level string, append bool) error {
 	formatter := &logrus.TextFormatter{DisableSorting: true}
 	if output == "stderr" {
 		l.Out = os.Stderr
@@ -72,7 +72,7 @@ func setupLogger(l *logrus.Logger, output, logDir, level string) error {
 		l.Out = ioutil.Discard
 	} else {
 		formatter.DisableColors = true
-		if out, err := touchLogOutput(output, logDir, true); err != nil {
+		if out, err := touchLogOutput(output, logDir, append); err != nil {
 			return err
 		} else {
 			util.AddHook(func() { out.Close() })
@@ -86,9 +86,9 @@ func setupLogger(l *logrus.Logger, output, logDir, level string) error {
 	return nil
 }
 
-func SetupLogger(output, logDir, level string) (err error) {
+func SetupLogger(output, logDir, level string, append bool) (err error) {
 	once.Do(func() {
-		err = setupLogger(paxosLogger, output, logDir, level)
+		err = setupLogger(paxosLogger, output, logDir, level, append)
 	})
 	return
 }
