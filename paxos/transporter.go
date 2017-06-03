@@ -47,12 +47,12 @@ func (t *transporter) send(nodeID uint64, msgType comm.MsgType, msg proto.Messag
 		return err
 	}
 
-	addr, ok := t.groupCfg.GetMembers()[nodeID]
+	member, ok := t.groupCfg.GetMembers()[nodeID]
 	if !ok {
 		return t.sender.SendMessage(network.Uint64ToAddr(nodeID), b)
 		//return fmt.Errorf("transporter: can't find node id: %d", nodeID)
 	}
-	return t.sender.SendMessage(addr, b)
+	return t.sender.SendMessage(member.GetAddr(), b)
 }
 
 func (t *transporter) pack(msgType comm.MsgType, pb proto.Message) ([]byte, error) {
@@ -61,7 +61,7 @@ func (t *transporter) pack(msgType comm.MsgType, pb proto.Message) ([]byte, erro
 		Type:      msgType.Enum(),
 		Version:   proto.Int32(1),
 	}
-	b, err := comm.ObjectToBytes(t.groupCfg.GetGroupID())
+	b, err := util.ObjectToBytes(t.groupCfg.GetGroupID())
 	if err != nil {
 		return nil, fmt.Errorf("transporter: convert group id %d to bytes: %v",
 			t.groupCfg.GetGroupID(), err)
@@ -70,7 +70,7 @@ func (t *transporter) pack(msgType comm.MsgType, pb proto.Message) ([]byte, erro
 	if err != nil {
 		return nil, fmt.Errorf("transporter: marshal message header: %v", err)
 	}
-	l, err := comm.IntToBytes(len(h))
+	l, err := util.IntToBytes(len(h))
 	if err != nil {
 		return nil, fmt.Errorf("transporter: convert message header length to bytes: %v", err)
 	}
@@ -80,14 +80,14 @@ func (t *transporter) pack(msgType comm.MsgType, pb proto.Message) ([]byte, erro
 	if err != nil {
 		return nil, fmt.Errorf("transporter: marshal message: %v", err)
 	}
-	l, err = comm.IntToBytes(len(m))
+	l, err = util.IntToBytes(len(m))
 	if err != nil {
 		return nil, fmt.Errorf("transporter: convert message length to bytes: %v", err)
 	}
 	b = append(b, l...)
 	b = append(b, m...)
 	checksum := util.Checksum(b)
-	l, err = comm.ObjectToBytes(checksum)
+	l, err = util.ObjectToBytes(checksum)
 	if err != nil {
 		return nil, fmt.Errorf("transporter: convert checksum to bytes: %v", err)
 	}
@@ -103,10 +103,10 @@ func (t *transporter) broadcast(msgType comm.MsgType, msg proto.Message) error {
 
 	errs := make([]error, 0)
 	members := t.groupCfg.GetMembers()
-	for id, addr := range members {
+	for id, member := range members {
 		if id != t.groupCfg.GetNodeID() {
-			if err = t.sender.SendMessage(addr, b); err != nil {
-				errs = append(errs, fmt.Errorf("send message to %s: %v", addr, err))
+			if err = t.sender.SendMessage(member.GetAddr(), b); err != nil {
+				errs = append(errs, fmt.Errorf("send message to %s: %v", member.GetAddr(), err))
 			}
 		}
 	}
