@@ -42,7 +42,7 @@ to quickly create a Cobra application.`,
 			Name: viper.GetString("name"),
 			GroupCount: viper.GetInt("group-count"),
 			Members: viper.GetString("members"),
-			EnableMemberShip: viper.GetBool("membership"),
+			EnableMembership: viper.GetBool("membership"),
 			ForceNewMembers: viper.GetBool("force-new-members"),
 			FollowerMode: viper.GetBool("follower-mode"),
 			FollowNode: viper.GetString("follow-node"),
@@ -58,8 +58,8 @@ to quickly create a Cobra application.`,
 			Token: viper.GetString("token"),
 			ListenMode: viper.GetString("listen-mode"),
 			AdvertiseIP: viper.GetString("advertise-ip"),
-			ListenIP: viper.GetString("listen-ip"),
-			ListenPort: viper.GetInt("listen-port"),
+			ListenPeerIP: viper.GetString("listen-peer-ip"),
+			ListenPeerPort: viper.GetInt("listen-peer-port"),
 			ListenTimeout: viper.GetDuration("listen-timeout") * time.Millisecond,
 			DialTimeout: viper.GetDuration("dial-timeout") * time.Millisecond,
 			WriteTimeout: viper.GetDuration("write-timeout") * time.Millisecond,
@@ -68,13 +68,15 @@ to quickly create a Cobra application.`,
 			ServerChanCap: viper.GetInt("server-capacity"),
 			ClientChanCap: viper.GetInt("client-capacity"),
 
+			ListenClientAddr: viper.GetString("listen-client-addr"),
+
 			EnableElection: viper.GetBool("election"),
 			ElectionTimeout: viper.GetDuration("election-timeout") * time.Second,
 
 			LogDir: viper.GetString("log-dir"),
 			LogOutput: viper.GetString("log-output"),
 			LogLevel: viper.GetString("log-level"),
-
+			LogAppend: viper.GetBool("log-append"),
 		}
 
 		err := paxosmain.StartPaxos(cfg)
@@ -103,7 +105,7 @@ func init() {
 	flags.String("name", comm.DefaultName, "readable name for this member")
 	flags.Int("group-count", comm.DefaultGroupCount, "number of group")
 	flags.String("members", comm.DefaultMembers, "initial cluster members for bootstrapping (comma-separated)")
-	flags.Bool("membership", comm.DefaultMemberShip, "enable cluster membership")
+	flags.Bool("membership", comm.DefaultMembership, "enable cluster membership")
 	flags.Bool("force-new-members", comm.DefaultForceNewMembers, "force to create new cluster members")
 	flags.Bool("follower-mode", comm.DefaultFollowerMode, "enable follower mode")
 	flags.String("follow-node", comm.DefaultFollowNode, "node address to follow if 'follower-mode' is true")
@@ -120,8 +122,8 @@ func init() {
 	flags.String("token", comm.DefaultToken, "token of peers' traffic")
 	flags.String("listen-mode", comm.DefaultListenMode, "network listen mode ('tcp' or 'udp')")
 	flags.String("advertise-ip", comm.DefaultAdvertiseIP, "advertise ip to the cluster")
-	flags.String("listen-ip", comm.DefaultListenIP, "ip to listen on for peers' traffic")
-	flags.Int("listen-port", comm.DefaultListenPort, "port to listen on for peers' traffic")
+	flags.String("listen-peer-ip", comm.DefaultListenPeerIP, "ip to listen on for peers' traffic")
+	flags.Int("listen-peer-port", comm.DefaultListenPeerPort, "port to listen on for peers' traffic")
 	flags.Int("listen-timeout", comm.DefaultListenTimeout, "time (in milliseconds) for server listen to timeout")
 	flags.Int("dial-timeout", comm.DefaultDialTimeout, "time (in milliseconds) for a client dial to timeout")
 	flags.Int("write-timeout", comm.DefaultWriteTimeout, "time (in milliseconds) for a client write to timeout")
@@ -130,12 +132,15 @@ func init() {
 	flags.Int("server-capacity", comm.DefaultServerCap, "buffer capacity for server receive message channel")
 	flags.Int("client-capacity", comm.DefaultClientCap, "buffer capacity for client send message channel")
 
-	flags.Bool("election", comm.DefaultElection, "enable master election")
+	flags.String("listen-client-addr", comm.DefaultListenClientAddr, "address to listen on for clients' traffic")
+
+	flags.Bool("election", comm.DefaultElection, "enable leader election")
 	flags.Int("election-timeout", comm.DefaultElectionTimeout, "time (in milliseconds) for an election to timeout")
 
 	flags.String("log-dir", comm.DefaultLogDir, "path to the log directory")
 	flags.String("log-output", comm.DefaultLogOutput, "log output for logger, can specify 'stdout', 'stderr' or '/dev/null'")
 	flags.String("log-level", comm.DefaultLogLevel, "log level for logger")
+	flags.Bool("log-append", comm.DefaultLogAppend, "append for logger")
 	viper.BindPFlags(flags)
 }
 

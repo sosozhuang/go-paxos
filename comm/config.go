@@ -24,7 +24,7 @@ type Config struct {
 	Name             string
 	GroupCount       int
 	Members          string
-	EnableMemberShip bool
+	EnableMembership bool
 	ForceNewMembers  bool
 	FollowerMode     bool
 	FollowNode       string
@@ -39,12 +39,12 @@ type Config struct {
 	DisableWAL       bool
 	MaxLogCount      int64
 
-	//network
+	//peer network
 	Token            string
 	ListenMode       string
 	AdvertiseIP      string
-	ListenIP         string
-	ListenPort       int
+	ListenPeerIP     string
+	ListenPeerPort   int
 	ListenTimeout    time.Duration
 	DialTimeout      time.Duration
 	WriteTimeout     time.Duration
@@ -52,6 +52,9 @@ type Config struct {
 	KeepAlive        time.Duration
 	ServerChanCap    int
 	ClientChanCap    int
+
+	//client network
+	ListenClientAddr string
 
 	//election
 	EnableElection   bool
@@ -61,6 +64,7 @@ type Config struct {
 	LogDir           string
 	LogOutput        string
 	LogLevel         string
+	LogAppend        bool
 }
 
 func (cfg Config) String() string {
@@ -69,7 +73,7 @@ func (cfg Config) String() string {
 	fmt.Fprintf(x, "name: %s\n", cfg.Name)
 	fmt.Fprintf(x, "group count: %d\n", cfg.GroupCount)
 	fmt.Fprintf(x, "members: %s\n", cfg.Members)
-	fmt.Fprintf(x, "enable member ship: %v\n", cfg.EnableMemberShip)
+	fmt.Fprintf(x, "enable membership: %v\n", cfg.EnableMembership)
 	fmt.Fprintf(x, "force new members: %v\n", cfg.ForceNewMembers)
 	fmt.Fprintf(x, "follower mode: %v\n", cfg.FollowerMode)
 	fmt.Fprintf(x, "follow node: %s\n", cfg.FollowNode)
@@ -84,12 +88,12 @@ func (cfg Config) String() string {
 	fmt.Fprintf(x, "disable wal: %v\n", cfg.DisableWAL)
 	fmt.Fprintf(x, "max log count: %d\n", cfg.MaxLogCount)
 
-	fmt.Fprintln(x, "[network config]")
+	fmt.Fprintln(x, "[peer network config]")
 	fmt.Fprintf(x, "token: %s\n", cfg.Token)
 	fmt.Fprintf(x, "listen mode: %s\n", cfg.ListenMode)
 	fmt.Fprintf(x, "advertise ip: %s\n", cfg.AdvertiseIP)
-	fmt.Fprintf(x, "listen ip: %s\n", cfg.ListenIP)
-	fmt.Fprintf(x, "listen port: %d\n", cfg.ListenPort)
+	fmt.Fprintf(x, "listen peer ip: %s\n", cfg.ListenPeerIP)
+	fmt.Fprintf(x, "listen peer port: %d\n", cfg.ListenPeerPort)
 	fmt.Fprintf(x, "listen timeout: %v\n", cfg.ListenTimeout)
 	fmt.Fprintf(x, "dial timeout: %v\n", cfg.DialTimeout)
 	fmt.Fprintf(x, "write timeout: %v\n", cfg.WriteTimeout)
@@ -98,6 +102,9 @@ func (cfg Config) String() string {
 	fmt.Fprintf(x, "server channel capacity: %d\n", cfg.ServerChanCap)
 	fmt.Fprintf(x, "client channel capacity: %d\n", cfg.ClientChanCap)
 
+	fmt.Fprintln(x, "[client network config]")
+	fmt.Fprintf(x, "listen client addr: %s\n", cfg.ListenClientAddr)
+
 	fmt.Fprintln(x, "[election config]")
 	fmt.Fprintf(x, "enable election: %v\n", cfg.EnableElection)
 	fmt.Fprintf(x, "election timeout: %v\n", cfg.ElectionTimeout)
@@ -105,7 +112,8 @@ func (cfg Config) String() string {
 	fmt.Fprintln(x, "[log config]")
 	fmt.Fprintf(x, "log dir: %s\n", cfg.LogDir)
 	fmt.Fprintf(x, "log output: %s\n", cfg.LogOutput)
-	fmt.Fprintf(x, "log level: %s", cfg.LogLevel)
+	fmt.Fprintf(x, "log level: %s\n", cfg.LogLevel)
+	fmt.Fprintf(x, "log append: %v", cfg.LogAppend)
 	return x.String()
 }
 
@@ -115,7 +123,7 @@ const (
 	DefaultName = "default"
 	DefaultGroupCount = 10
 	DefaultMembers = ""
-	DefaultMemberShip = true
+	DefaultMembership = true
 	DefaultForceNewMembers = false
 	DefaultFollowerMode = false
 	DefaultFollowNode = ""
@@ -130,12 +138,12 @@ const (
 	DefaultDisableWAL = false
 	DefaultMaxLogCount = 10000
 
-	//network
+	//peer network
 	DefaultToken = "paxos"
 	DefaultListenMode = "tcp"
 	DefaultAdvertiseIP = ""
-	DefaultListenIP = ""
-	DefaultListenPort = 17524
+	DefaultListenPeerIP = ""
+	DefaultListenPeerPort = 17524
 	DefaultListenTimeout = 3 * 1000
 	DefaultDialTimeout = 30 * 1000
 	DefaultWriteTimeout = 3 * 1000
@@ -143,6 +151,9 @@ const (
 	DefaultKeepAlivePeriod = 60 * 60
 	DefaultServerCap = 100
 	DefaultClientCap = 100
+
+	//client network
+	DefaultListenClientAddr = "http://127.0.0.1:17603"
 
 	//election
 	DefaultElection = true
@@ -152,4 +163,5 @@ const (
 	DefaultLogDir = "."
 	DefaultLogOutput = ""
 	DefaultLogLevel = "INFO"
+	DefaultLogAppend = true
 )
