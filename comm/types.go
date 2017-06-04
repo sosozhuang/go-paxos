@@ -22,6 +22,7 @@ import (
 
 const (
 	UnknownNodeID     = 0
+	UnknownClusterID  = 0
 	UnknownVersion    = uint64(math.MaxUint64)
 	UnknownInstanceID = uint64(math.MaxUint64)
 	GroupIDLen        = int(unsafe.Sizeof(uint16(0)))
@@ -30,8 +31,8 @@ const (
 )
 
 const (
-	SystemStateMachineID uint32 = 100000000 + iota
-	MasterStateMachineID
+	ClusterStateMachineID uint32 = 100000000 + iota
+	LeaderStateMachineID
 )
 
 type Receiver interface {
@@ -56,6 +57,7 @@ type Node interface {
 	ProposeWithCtx(context.Context, uint16, uint32, []byte) error
 	ProposeWithCtxTimeout(context.Context, uint16, uint32, []byte, time.Duration) error
 	GetNodeID() uint64
+	GetLeader(uint16) (Member, error)
 }
 
 type Proposer interface {
@@ -91,14 +93,14 @@ type GroupConfig interface {
 	GetMemberCount() int
 	GetMajorityCount() int
 	GetLearnNodes() map[uint64]string
-	GetMembers() map[uint64]string
+	GetMembers() map[uint64]Member
 	GetFollowers() map[uint64]string
 	AddFollower(uint64)
 	IsEnableReplayer() bool
-	GetSystemCheckpoint() ([]byte, error)
-	UpdateSystemByCheckpoint([]byte) error
-	GetMasterCheckpoint() ([]byte, error)
-	UpdateMasterByCheckpoint([]byte) error
+	GetClusterCheckpoint() ([]byte, error)
+	UpdateClusterByCheckpoint([]byte) error
+	GetLeaderCheckpoint() ([]byte, error)
+	UpdateLeaderByCheckpoint([]byte) error
 }
 
 type Group interface {
@@ -115,10 +117,11 @@ type Group interface {
 	PauseCleaner()
 	ContinueCleaner()
 	SetMaxLogCount(int64)
-	SetMembers(map[uint64]string)
-	AddMember(context.Context, uint64, string) (<-chan Result, error)
-	RemoveMember(context.Context, uint64) (<-chan Result, error)
-	ChangeMember(context.Context, uint64, string, uint64) (<-chan Result, error)
+	GetMembers() map[uint64]Member
+	SetMembers(map[uint64]Member)
+	AddMember(context.Context, Member) (<-chan Result, error)
+	RemoveMember(context.Context, Member) (<-chan Result, error)
+	ChangeMember(context.Context, Member, Member) (<-chan Result, error)
 }
 
 type Instance interface {
