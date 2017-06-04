@@ -89,7 +89,7 @@ func (c *cleaner) doClean(stopped <-chan struct{}) {
 	defer close(c.done)
 	var sleep, interval int64
 	if c.speed > 1000 {
-		sleep = 1
+		sleep = 10
 		interval = c.speed /1000 + 1
 	} else {
 		sleep = 1000 / c.speed
