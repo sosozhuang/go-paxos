@@ -95,7 +95,7 @@ func (r *replayer) replay(instanceID uint64) error {
 	if err != nil {
 		return err
 	}
-	var state comm.AcceptorStateData
+	var state comm.AcceptorState
 	if err = proto.Unmarshal(b, &state); err != nil {
 		return err
 	}
