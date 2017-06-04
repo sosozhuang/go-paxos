@@ -21,31 +21,35 @@ import (
 	"os"
 	"path"
 	"strings"
-	"syscall"
 	"sync/atomic"
+	"syscall"
 )
 
-//type Receiver interface {
-//	Prepare(comm.NodeID, uint64) error
-//	Reset()
-//	GetTmpDir(comm.StateMachineID) string
-//	Receive(*comm.CheckpointMsg) error
-//	IsFinished(comm.NodeID, uint64, uint64) bool
-//}
-
-type Receiver struct {
-	nodeID   comm.NodeID
-	uuid
-	sequence
-	dirs     map[string]struct{}
-	store.Storage
+type Receiver interface {
+	Prepare(uint64, uint64) error
+	Reset()
+	GetTmpDir(uint32) string
+	Receive(*comm.CheckpointMsg) error
+	IsFinished(uint64, uint64, uint64) bool
 }
 
-func (r *Receiver) Prepare(nodeID comm.NodeID, uuid uuid) error {
+type receiver struct {
+	nodeID   uint64
+	uuid     uint64
+	sequence uint64
+	dirs     map[string]struct{}
+	st       store.Storage
+}
+
+func NewReceiver(st store.Storage) Receiver {
+	return &receiver{st: st}
+}
+
+func (r *receiver) Prepare(nodeID, uuid uint64) error {
 	if err := r.removeTmpDir(); err != nil {
 		return err
 	}
-	if err := r.Storage.Recreate(); err != nil {
+	if err := r.st.Recreate(); err != nil {
 		return err
 	}
 
@@ -56,15 +60,15 @@ func (r *Receiver) Prepare(nodeID comm.NodeID, uuid uuid) error {
 	return nil
 }
 
-func (r *Receiver) Reset() {
+func (r *receiver) Reset() {
 	r.nodeID = comm.UnknownNodeID
 	r.uuid = 0
 	r.sequence = 0
 	r.dirs = make(map[string]struct{})
 }
 
-func (r *Receiver) removeTmpDir() error {
-	d, err := os.Open(r.Storage.GetDir())
+func (r *receiver) removeTmpDir() error {
+	d, err := os.Open(r.st.GetDir())
 	if err != nil {
 		return err
 	}
@@ -83,15 +87,15 @@ func (r *Receiver) removeTmpDir() error {
 	return nil
 }
 
-func (r *Receiver) IsFinished(nodeID comm.NodeID, uuid uuid, seq sequence) bool {
+func (r *receiver) IsFinished(nodeID, uuid, seq uint64) bool {
 	return r.nodeID == nodeID && r.uuid == uuid && r.sequence+1 == seq
 }
 
-func (r *Receiver) GetTmpDir(id comm.StateMachineID) string {
-	return path.Join(r.Storage.GetDir(), fmt.Sprintf("cp_tmp_%d", id))
+func (r *receiver) GetTmpDir(id uint32) string {
+	return path.Join(r.st.GetDir(), fmt.Sprintf("cp_tmp_%d", id))
 }
 
-func (r *Receiver) initFilePath(filename string) error {
+func (r *receiver) initFilePath(filename string) error {
 	dir := path.Dir(filename)
 	if _, ok := r.dirs[dir]; ok {
 		return nil
@@ -103,7 +107,7 @@ func (r *Receiver) initFilePath(filename string) error {
 	return nil
 }
 
-func (r *Receiver) Receive(msg *comm.CheckpointMsg) error {
+func (r *receiver) Receive(msg *comm.CheckpointMsg) error {
 	if msg.GetNodeID() != r.nodeID || msg.GetUUID() != r.uuid {
 		return errors.New("invalid checkpoint msg")
 	}
@@ -129,11 +133,11 @@ func (r *Receiver) Receive(msg *comm.CheckpointMsg) error {
 	if offset != msg.GetOffset() {
 		return errors.New("invalid offset")
 	}
-	n, err := fileInfo.Write(msg.GetBuffer())
+	n, err := fileInfo.Write(msg.GetBytes())
 	if err != nil {
 		return err
 	}
-	if n != len(msg.GetBuffer()) {
+	if n != len(msg.GetBytes()) {
 		return errors.New("write failed")
 	}
 	atomic.AddUint64(&r.sequence, 1)
