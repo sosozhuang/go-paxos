@@ -25,21 +25,15 @@ import (
 var versionCmd = &cobra.Command{
 	Use:   "version",
 	Short: "show the version of paxos",
-	Long: `A longer description that spans multiple lines and likely contains examples
-and usage of using your command. For example:
-
-Cobra is a CLI library for Go that empowers applications.
-This application is a tool to generate the needed files
-to quickly create a Cobra application.`,
 	Run: printVersion,
 }
 
 const version = "0.1.0"
 
 func printVersion(cmd *cobra.Command, args []string) {
-	fmt.Printf("paxos Version: %s\n", version)
-	fmt.Printf("Go Version: %s\n", runtime.Version())
-	fmt.Printf("Go OS/Arch: %s/%s\n", runtime.GOOS, runtime.GOARCH)
+	fmt.Printf("Paxos Version: %s.\n", version)
+	fmt.Printf("Go Version: %s.\n", runtime.Version())
+	fmt.Printf("Go OS/Arch: %s/%s.\n", runtime.GOOS, runtime.GOARCH)
 }
 
 func init() {
