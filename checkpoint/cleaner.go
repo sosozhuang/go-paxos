@@ -15,7 +15,7 @@ package checkpoint
 
 import (
 	"github.com/sosozhuang/paxos/comm"
-	"github.com/sosozhuang/paxos/store"
+	"github.com/sosozhuang/paxos/storage"
 	"time"
 )
 
@@ -30,7 +30,7 @@ type Cleaner interface {
 }
 
 type cleaner struct {
-	st             store.Storage
+	st             storage.Storage
 	instance       comm.CheckpointInstance
 	cpm            CheckpointManager
 	pause          bool
@@ -45,7 +45,7 @@ func (c *cleaner) fixMinChosenInstanceID(instanceID uint64) error {
 	cpInstanceID := c.instance.GetCheckpointInstanceID() + 1
 	fix := instanceID
 	for i := instanceID; i < instanceID+100 && i < cpInstanceID; i++ {
-		if _, err := c.st.Get(i); err == store.ErrNotFound {
+		if _, err := c.st.Get(i); err == storage.ErrNotFound {
 			fix = i + 1
 		} else if err != nil {
 			return err
