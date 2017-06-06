@@ -22,10 +22,11 @@ import (
 	"github.com/sosozhuang/paxos/checkpoint"
 	"github.com/sosozhuang/paxos/comm"
 	"github.com/sosozhuang/paxos/logger"
-	"github.com/sosozhuang/paxos/store"
+	"github.com/sosozhuang/paxos/storage"
 	"sync"
 	"sync/atomic"
 	"time"
+	"github.com/sosozhuang/paxos/util"
 )
 
 var (
@@ -53,14 +54,14 @@ type instance struct {
 	acceptor Acceptor
 	learner  Learner
 	cpm      checkpoint.CheckpointManager
-	st       store.Storage
+	st       storage.Storage
 	ctx      context.Context
 	ch       chan *comm.PaxosMsg
 	retries  *msgHeap
 	wg       sync.WaitGroup
 }
 
-func NewInstance(groupCfg comm.GroupConfig, sender comm.Sender, st store.Storage) (comm.Instance, error) {
+func NewInstance(groupCfg comm.GroupConfig, sender comm.Sender, st storage.Storage) (comm.Instance, error) {
 	var err error
 	i := &instance{
 		groupCfg: groupCfg,
@@ -177,14 +178,14 @@ func (i *instance) initChecksum() error {
 		return nil
 	}
 	value, err := i.st.Get(i.acceptor.getInstanceID() - 1)
-	if err == store.ErrNotFound {
+	if err == storage.ErrNotFound {
 		i.checksum = 0
 		return nil
 	}
 	if err != nil {
 		return err
 	}
-	var state comm.AcceptorStateData
+	var state comm.AcceptorState
 	if err := proto.Unmarshal(value, &state); err != nil {
 		return fmt.Errorf("instance: unmarshal acceptor state: %v", err)
 	}
@@ -196,7 +197,7 @@ func (i *instance) replay(start, end uint64) error {
 	if start < i.cpm.GetMinChosenInstanceID() {
 		return fmt.Errorf("instance: start instance id %d less then min chosen instance id %d", start, i.cpm.GetMinChosenInstanceID())
 	}
-	var state comm.AcceptorStateData
+	var state comm.AcceptorState
 	for id := start; id < end; id++ {
 		b, err := i.st.Get(id)
 		if err != nil {
@@ -434,8 +435,11 @@ func (i *instance) verifyChecksum(msg *comm.PaxosMsg) error {
 }
 
 func (i *instance) execute(instanceID uint64, v []byte, local bool) error {
+	if len(v) <= comm.SMIDLen {
+		return nil
+	}
 	var smid uint32
-	if err := comm.BytesToObject(v[:comm.SMIDLen], &smid); err != nil {
+	if err := util.BytesToObject(v[:comm.SMIDLen], &smid); err != nil {
 		return fmt.Errorf("convert bytes to sm id: %v", err)
 	}
 	if smid == 0 {
@@ -450,7 +454,7 @@ func (i *instance) execute(instanceID uint64, v []byte, local bool) error {
 		err error
 	)
 	cid, ok := i.ctx.Value("instance_id").(uint64)
-	if local && ok && cid == instanceID {
+	if ok && cid == instanceID {
 		log.Debugf("Executing state machine %d, instance id %d.", smid, instanceID)
 		done := make(chan struct{})
 		i.wg.Add(1)
@@ -484,8 +488,8 @@ func (i *instance) GetCheckpointInstanceID() uint64 {
 		if id == comm.UnknownInstanceID {
 			continue
 		}
-		if sm.GetStateMachineID() == comm.MasterStateMachineID ||
-			sm.GetStateMachineID() == comm.SystemStateMachineID {
+		if sm.GetStateMachineID() == comm.LeaderStateMachineID ||
+			sm.GetStateMachineID() == comm.ClusterStateMachineID {
 			if id > a || a == comm.UnknownInstanceID {
 				a = id
 			}
@@ -527,7 +531,7 @@ func (i *instance) GetProposerInstanceID() uint64 {
 
 func (i *instance) ExecuteForCheckpoint(instanceID uint64, v []byte) error {
 	var smid uint32
-	if err := comm.BytesToObject(v[:comm.SMIDLen], &smid); err != nil {
+	if err := util.BytesToObject(v[:comm.SMIDLen], &smid); err != nil {
 		return fmt.Errorf("instance: convert bytes to smid: %v", err)
 	}
 	sm, ok := i.sms[smid]

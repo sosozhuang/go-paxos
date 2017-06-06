@@ -18,7 +18,7 @@ import (
 	"github.com/gogo/protobuf/proto"
 	"github.com/sosozhuang/paxos/comm"
 	"github.com/sosozhuang/paxos/logger"
-	"github.com/sosozhuang/paxos/store"
+	"github.com/sosozhuang/paxos/storage"
 	"sync/atomic"
 	"sync"
 	"errors"
@@ -50,7 +50,7 @@ type acceptor struct {
 	mu sync.RWMutex
 }
 
-func newAcceptor(instance Instance, tp Transporter, st store.Storage) Acceptor {
+func newAcceptor(instance Instance, tp Transporter, st storage.Storage) Acceptor {
 	s := acceptorState{
 		st: st,
 	}
@@ -99,7 +99,6 @@ func (a *acceptor) getAcceptorState(b *ballot) (value []byte, checksum uint32, e
 	}
 	if a.state.acceptedBallot.ne(*b) {
 		err = errors.New("accepted ballot not equal")
-		fmt.Println(a.state.acceptedBallot, *b)
 		return
 	}
 	value = make([]byte, len(a.state.acceptedValue))
@@ -191,7 +190,7 @@ func (a *acceptor) onAccept(msg *comm.PaxosMsg) {
 }
 
 type acceptorState struct {
-	st             store.Storage
+	st             storage.Storage
 	promisedBallot ballot
 	acceptedBallot ballot
 	acceptedValue  []byte
@@ -211,7 +210,7 @@ func (a *acceptorState) save(instanceID uint64, crc uint32) error {
 		a.checksum = util.UpdateChecksum(crc, a.acceptedValue)
 	}
 
-	state := &comm.AcceptorStateData{
+	state := &comm.AcceptorState{
 		InstanceID:     proto.Uint64(instanceID),
 		PromisedID:     proto.Uint64(a.promisedBallot.proposalID),
 		PromisedNodeID: proto.Uint64(a.promisedBallot.nodeID),
@@ -230,7 +229,7 @@ func (a *acceptorState) save(instanceID uint64, crc uint32) error {
 
 func (a *acceptorState) load() (uint64, error) {
 	instanceID, err := a.st.GetMaxInstanceID()
-	if err == store.ErrNotFound {
+	if err == storage.ErrNotFound {
 		return 0, nil
 	}
 	if err != nil {
@@ -240,7 +239,7 @@ func (a *acceptorState) load() (uint64, error) {
 	if err != nil {
 		return instanceID, err
 	}
-	state := &comm.AcceptorStateData{}
+	state := &comm.AcceptorState{}
 	if err = proto.Unmarshal(b, state); err != nil {
 		return instanceID, fmt.Errorf("acceptor: unmarshal state: %v", err)
 	}
