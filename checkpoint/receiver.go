@@ -17,7 +17,7 @@ import (
 	"errors"
 	"fmt"
 	"github.com/sosozhuang/paxos/comm"
-	"github.com/sosozhuang/paxos/store"
+	"github.com/sosozhuang/paxos/storage"
 	"os"
 	"path"
 	"strings"
@@ -38,10 +38,10 @@ type receiver struct {
 	uuid     uint64
 	sequence uint64
 	dirs     map[string]struct{}
-	st       store.Storage
+	st       storage.Storage
 }
 
-func NewReceiver(st store.Storage) Receiver {
+func NewReceiver(st storage.Storage) Receiver {
 	return &receiver{st: st}
 }
 

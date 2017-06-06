@@ -16,7 +16,7 @@ package checkpoint
 import (
 	"github.com/gogo/protobuf/proto"
 	"github.com/sosozhuang/paxos/comm"
-	"github.com/sosozhuang/paxos/store"
+	"github.com/sosozhuang/paxos/storage"
 	"time"
 )
 
@@ -29,7 +29,7 @@ type Replayer interface {
 }
 
 type replayer struct {
-	st       store.Storage
+	st       storage.Storage
 	instance comm.CheckpointInstance
 	cpm      CheckpointManager
 	pause    bool
