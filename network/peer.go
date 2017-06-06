@@ -46,7 +46,7 @@ func AddrToUint64(ip string, port int) (uint64, error) {
 	var n uint64
 	s := strings.Split(ip, ".")
 	if len(s) != 4 {
-		return 0, fmt.Errorf("network: unrecognize ip '%s'", ip)
+		return 0, fmt.Errorf("network: invalid ip '%s'", ip)
 	}
 	b0, err := strconv.Atoi(s[0])
 	if err != nil {
