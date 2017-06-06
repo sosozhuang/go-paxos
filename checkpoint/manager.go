@@ -16,7 +16,7 @@ package checkpoint
 import (
 	"errors"
 	"github.com/sosozhuang/paxos/comm"
-	"github.com/sosozhuang/paxos/store"
+	"github.com/sosozhuang/paxos/storage"
 	"time"
 	"github.com/sosozhuang/paxos/logger"
 )
@@ -44,7 +44,7 @@ type cpm struct {
 	maxChosenInstanceID uint64
 	lastCheckpointTime  time.Time
 	groupCfg            comm.GroupConfig
-	st                  store.Storage
+	st                  storage.Storage
 	cleaner             Cleaner
 	replayer            Replayer
 	askNodes            map[uint64]struct{}
@@ -52,7 +52,7 @@ type cpm struct {
 
 func NewCheckpointManager(groupCfg comm.GroupConfig,
 	instance comm.CheckpointInstance,
-	st store.Storage) (CheckpointManager, error) {
+	st storage.Storage) (CheckpointManager, error) {
 	instanceID, err := st.GetMinChosenInstanceID()
 	if err != nil {
 		return nil, err
