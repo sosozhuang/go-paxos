@@ -18,9 +18,10 @@ import (
 	"github.com/gogo/protobuf/proto"
 	"github.com/sosozhuang/paxos/comm"
 	"github.com/sosozhuang/paxos/logger"
-	"github.com/sosozhuang/paxos/store"
+	"github.com/sosozhuang/paxos/storage"
 	"math/rand"
 	"time"
+	"errors"
 )
 
 var (
@@ -35,6 +36,9 @@ const (
 
 type LeaderConfig struct {
 	NodeID          uint64
+	Name            string
+	Addr            string
+	ServiceUrl      string
 	GroupID         uint16
 	ElectionTimeout time.Duration
 }
@@ -44,18 +48,23 @@ func (cfg *LeaderConfig) validate() error {
 		log.Warningf("Leader election time out %v, should not less than %v.", cfg.ElectionTimeout, minElectionTimeout)
 		cfg.ElectionTimeout = minElectionTimeout
 	}
+	if cfg.ServiceUrl == "" {
+		return errors.New("leader: empty service url")
+	}
 	return nil
 }
 
-type Leader interface {
-	Start(context.Context, <-chan struct{}) error
+type Leadership interface {
+	Start(<-chan struct{}) error
 	Stop()
+	IsLeader() bool
+	GetLeader() comm.Member
 	SetElectionTimeout(time.Duration)
 	GiveUp()
 	GetStateMachine() comm.StateMachine
 }
 
-type leader struct {
+type leadership struct {
 	cfg      *LeaderConfig
 	proposer comm.Proposer
 	sm       *leaderStateMachine
@@ -63,35 +72,35 @@ type leader struct {
 	done     chan struct{}
 }
 
-func NewLeader(cfg LeaderConfig, proposer comm.Proposer, st store.Storage) (Leader, error) {
+func NewLeadership(cfg LeaderConfig, proposer comm.Proposer, st storage.Storage) (Leadership, error) {
 	if err := cfg.validate(); err != nil {
 		return nil, err
 	}
-	leader := &leader{
+	ls := &leadership{
 		cfg:      &cfg,
 		proposer: proposer,
 	}
 	var err error
-	leader.sm, err = newLeaderStateMachine(leader.cfg.NodeID, st)
+	ls.sm, err = newLeaderStateMachine(ls.cfg.NodeID, st)
 	if err != nil {
 		return nil, err
 	}
-	return leader, nil
+	return ls, nil
 }
 
-func (m *leader) Start(ctx context.Context, stopped <-chan struct{}) error {
-	m.done = make(chan struct{})
-	go m.start(stopped)
+func (l *leadership) Start(stopped <-chan struct{}) error {
+	l.done = make(chan struct{})
+	go l.start(stopped)
 	return nil
 }
 
-func (l *leader) Stop() {
+func (l *leadership) Stop() {
 	if l.done != nil {
 		<-l.done
 	}
 }
 
-func (l *leader) start(stopped <-chan struct{}) {
+func (l *leadership) start(stopped <-chan struct{}) {
 	defer close(l.done)
 	for {
 		select {
@@ -101,7 +110,7 @@ func (l *leader) start(stopped <-chan struct{}) {
 		}
 		leaseTime := l.cfg.ElectionTimeout
 		start := time.Now()
-		l.elect(leaseTime)
+		l.proposeLeaderElection(leaseTime)
 		continueTime := (leaseTime - hundredMilliSecond) / 3
 		continueTime = continueTime/2 + time.Duration(rand.Int63())%continueTime
 		if l.giveUp {
@@ -115,7 +124,16 @@ func (l *leader) start(stopped <-chan struct{}) {
 	}
 }
 
-func (l *leader) SetElectionTimeout(d time.Duration) {
+func (l *leadership) GetLeader() (leader comm.Member) {
+	leader, _ = l.sm.getLeaderInfo()
+	return
+}
+
+func (l *leadership) IsLeader() bool {
+	return l.sm.isLeader()
+}
+
+func (l *leadership) SetElectionTimeout(d time.Duration) {
 	if d < minElectionTimeout {
 		log.Warningf("Leader election time out %v, should not less than %v.", d, minElectionTimeout)
 		return
@@ -123,35 +141,44 @@ func (l *leader) SetElectionTimeout(d time.Duration) {
 	l.cfg.ElectionTimeout = d
 }
 
-func (l *leader) elect(d time.Duration) {
-	nodeID, version := l.sm.safeGetLeaderInfo()
-	if nodeID != comm.UnknownNodeID && nodeID != l.cfg.NodeID {
-		log.Debugf("Currently leader node id is %d, give up election.", nodeID)
+func (l *leadership) proposeLeaderElection(d time.Duration) {
+	leader, version := l.sm.safeGetLeaderInfo()
+	if leader.GetNodeID() != comm.UnknownNodeID && leader.GetNodeID() != l.cfg.NodeID {
+		log.Debugf("Currently leader is %v, give up election.", &leader)
 		return
 	}
-	log.Debugf("Start leader election.")
+	log.Debugf("Start to propose leader election.")
 
-	op := &comm.LeaderElection{
-		NodeID:       proto.Uint64(l.cfg.NodeID),
+	leader = comm.Member{
+		NodeID: proto.Uint64(l.cfg.NodeID),
+		Name: proto.String(l.cfg.Name),
+		Addr: proto.String(l.cfg.Addr),
+		ServiceUrl: proto.String(l.cfg.ServiceUrl),
+	}
+	info := &comm.LeaderInfo{
+		Leader:       &leader,
 		Version:      proto.Uint64(version),
 		ElectionTimeout: proto.Int64(int64(d)),
 	}
 
-	value, err := proto.Marshal(op)
+	value, err := proto.Marshal(info)
 	if err != nil {
 		log.Errorf("Leader election marshal data error: %v.", err)
 		return
 	}
 	ctx := context.WithValue(context.Background(), leaderLeaseTermKey, time.Now().Add(d-hundredMilliSecond))
 	if err = l.proposer.ProposeWithCtx(ctx, l.cfg.GroupID, comm.LeaderStateMachineID, value); err != nil {
-		log.Errorf("Leader election propose return: %v.", err)
+		log.Errorf("Propose leader election return: %v.", err)
+		return
 	}
+	leader, version = l.sm.getLeaderInfo()
+	log.Debugf("Propose leader election result: leader %v, version %d.", &leader, version)
 }
 
-func (l *leader) GiveUp() {
+func (l *leadership) GiveUp() {
 	l.giveUp = true
 }
 
-func (l *leader) GetStateMachine() comm.StateMachine {
+func (l *leadership) GetStateMachine() comm.StateMachine {
 	return l.sm
 }
