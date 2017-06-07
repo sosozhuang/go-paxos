@@ -19,108 +19,118 @@ import (
 	"fmt"
 	"github.com/gogo/protobuf/proto"
 	"github.com/sosozhuang/paxos/comm"
-	"github.com/sosozhuang/paxos/store"
+	"github.com/sosozhuang/paxos/storage"
 	"sync"
 	"time"
 )
 
+var (
+	UnknownLeader = comm.Member{
+		NodeID: proto.Uint64(comm.UnknownNodeID),
+		Name:   proto.String(""),
+		ServiceUrl:   proto.String(""),
+	}
+)
 type leaderStateMachine struct {
-	nodeID          uint64
-	st              store.Storage
-	leaderNodeID    uint64
-	leaderVersion   uint64
-	electionTimeout time.Duration
-	expireTime      time.Time
-	mu              sync.RWMutex
+	nodeID     uint64
+	st         storage.Storage
+	info       *comm.LeaderInfo
+	expireTime time.Time
+	mu         sync.RWMutex
+	//leaderNodeID    uint64
+	//leaderVersion   uint64
+	//electionTimeout time.Duration
 }
 
-func newLeaderStateMachine(nodeID uint64, st store.Storage) (*leaderStateMachine, error) {
-	m := &leaderStateMachine{
-		nodeID:        nodeID,
-		st:            st,
-		leaderNodeID:  comm.UnknownNodeID,
-		leaderVersion: comm.UnknownVersion,
+func newLeaderStateMachine(nodeID uint64, st storage.Storage) (*leaderStateMachine, error) {
+	info := &comm.LeaderInfo{
+		Leader: &UnknownLeader,
+		Version: proto.Uint64(comm.UnknownVersion),
 	}
-	v, err := st.GetLeaderInfo()
-	if err == store.ErrNotFound {
+	m := &leaderStateMachine{
+		nodeID: nodeID,
+		st:     st,
+		info:   info,
+		//leaderNodeID:  comm.UnknownNodeID,
+		//leaderVersion: comm.UnknownVersion,
+	}
+	info, err := st.GetLeaderInfo()
+	if err == storage.ErrNotFound {
 		return m, nil
 	}
 	if err != nil {
 		return nil, err
 	}
 
-	m.leaderVersion = v.GetVersion()
-	if v.GetNodeID() == m.nodeID {
-		m.leaderNodeID = comm.UnknownNodeID
+	if info.GetLeader().GetNodeID() == m.nodeID {
 		m.expireTime = time.Now()
 	} else {
-		m.leaderNodeID = v.GetNodeID()
-		m.expireTime = time.Now().Add(time.Duration(v.GetElectionTimeout()))
+		m.info = info
+		m.expireTime = time.Now().Add(time.Duration(info.GetElectionTimeout()))
 	}
 	return m, nil
 }
 
-func (l *leaderStateMachine) saveLeaderInfo(nodeID, version uint64, d int64) error {
-	return l.st.SetLeaderInfo(&comm.LeaderInfo{
-		NodeID:          proto.Uint64(nodeID),
-		Version:         proto.Uint64(version),
-		ElectionTimeout: proto.Int64(d),
-	})
+func (l *leaderStateMachine) saveLeaderInfo(info *comm.LeaderInfo) error {
+	return l.st.SetLeaderInfo(info)
 }
 
-func (l *leaderStateMachine) learn(instanceID uint64, election *comm.LeaderElection, t time.Time) error {
+func (l *leaderStateMachine) learn(info *comm.LeaderInfo, t time.Time) error {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 
-	if l.leaderVersion != election.GetVersion() {
-		return nil
-	}
-
-	if err := l.saveLeaderInfo(election.GetNodeID(), instanceID, election.GetElectionTimeout()); err != nil {
+	if err := l.saveLeaderInfo(info); err != nil {
 		return err
 	}
 
-	l.leaderNodeID = election.GetNodeID()
-	if l.leaderNodeID == l.nodeID {
+	l.info = info
+	if l.info.GetLeader().GetNodeID() == l.nodeID {
 		l.expireTime = t
 	} else {
-		l.expireTime = time.Now().Add(time.Duration(election.GetElectionTimeout()))
+		l.expireTime = time.Now().Add(time.Duration(l.info.GetElectionTimeout()))
 	}
-	l.electionTimeout = time.Duration(election.GetElectionTimeout())
-	l.leaderVersion = instanceID
 	return nil
 }
 
-func (l *leaderStateMachine) safeGetLeaderInfo() (uint64, uint64) {
+func (l *leaderStateMachine) safeGetLeaderInfo() (comm.Member, uint64) {
 	l.mu.RLock()
 	defer l.mu.RUnlock()
 	return l.getLeaderInfo()
 }
 
-func (l *leaderStateMachine) getLeaderInfo() (uint64, uint64) {
+func (l *leaderStateMachine) getLeaderInfo() (comm.Member, uint64) {
 	if time.Now().After(l.expireTime) {
-		return comm.UnknownNodeID, l.leaderVersion
+		return UnknownLeader, l.info.GetVersion()
 	}
 
-	return l.leaderNodeID, l.leaderVersion
+	return comm.Member{
+		NodeID: proto.Uint64(l.info.GetLeader().GetNodeID()),
+		Name: proto.String(l.info.GetLeader().GetName()),
+		ServiceUrl: proto.String(l.info.GetLeader().GetServiceUrl()),
+	}, l.info.GetVersion()
 }
 
 func (l *leaderStateMachine) isLeader() bool {
-	n, _ := l.getLeaderInfo()
-	return n == l.nodeID
+	leader, _ := l.getLeaderInfo()
+	return leader.GetNodeID() == l.nodeID
 }
 
 func (l *leaderStateMachine) Execute(ctx context.Context, instanceID uint64, value []byte) (interface{}, error) {
-	election := &comm.LeaderElection{}
-	if err := proto.Unmarshal(value, election); err != nil {
+	info := &comm.LeaderInfo{}
+	if err := proto.Unmarshal(value, info); err != nil {
 		return nil, fmt.Errorf("leader: unmarshal data: %v", err)
+	}
+	if info.GetVersion() != l.info.GetVersion() {
+		log.Warningf("Leader state machine receive leader info version %d not equals to %d.", info.GetVersion(), l.info.GetVersion())
+		return nil, nil
 	}
 
 	t, ok := ctx.Value(leaderLeaseTermKey).(time.Time)
 	if !ok {
 		t = time.Now()
 	}
-	return election, l.learn(instanceID, election, t)
+	info.Version = proto.Uint64(instanceID)
+	return info.GetLeader(), l.learn(info, t)
 }
 
 func (l *leaderStateMachine) GetStateMachineID() uint32 {
@@ -128,16 +138,18 @@ func (l *leaderStateMachine) GetStateMachineID() uint32 {
 }
 
 func (l *leaderStateMachine) GetCheckpoint() ([]byte, error) {
-	if l.leaderVersion == comm.UnknownVersion {
+	l.mu.RLock()
+	defer l.mu.RUnlock()
+	if l.info.GetVersion() == comm.UnknownVersion {
 		return nil, nil
 	}
 
-	v := &comm.LeaderInfo{
-		NodeID:          proto.Uint64(l.leaderNodeID),
-		Version:         proto.Uint64(l.leaderVersion),
-		ElectionTimeout: proto.Int64(int64(l.electionTimeout)),
-	}
-	b, err := proto.Marshal(v)
+	//v := &comm.LeaderInfo{
+	//	NodeID:          proto.Uint64(l.leaderNodeID),
+	//	Version:         proto.Uint64(l.leaderVersion),
+	//	ElectionTimeout: proto.Int64(int64(l.electionTimeout)),
+	//}
+	b, err := proto.Marshal(l.info)
 	if err != nil {
 		return nil, fmt.Errorf("leader: marshal data: %v", err)
 	}
@@ -148,24 +160,23 @@ func (l *leaderStateMachine) UpdateByCheckpoint(b []byte) error {
 	if len(b) <= 0 {
 		return errors.New("leader: empty bytes")
 	}
-	v := &comm.LeaderInfo{}
-	if err := proto.Unmarshal(b, v); err != nil {
+	info := &comm.LeaderInfo{}
+	if err := proto.Unmarshal(b, info); err != nil {
 		return fmt.Errorf("leader: unmarshal data: %v", err)
 	}
 
-	if v.GetVersion() <= l.leaderVersion && l.leaderVersion != comm.UnknownVersion {
+	if l.info.GetVersion() != comm.UnknownVersion && info.GetVersion() <= l.info.GetVersion() {
 		return nil
 	}
-	if err := l.saveLeaderInfo(v.GetNodeID(), v.GetVersion(), v.GetElectionTimeout()); err != nil {
+	if err := l.saveLeaderInfo(info); err != nil {
 		return err
 	}
-	l.leaderVersion = v.GetVersion()
-	if l.nodeID == v.GetNodeID() {
-		l.leaderNodeID = comm.UnknownNodeID
+	if l.nodeID == info.GetLeader().GetNodeID() {
+		l.info.GetLeader().NodeID = proto.Uint64(comm.UnknownNodeID)
 		l.expireTime = time.Now()
 	} else {
-		l.leaderNodeID = v.GetNodeID()
-		l.expireTime = time.Now().Add(time.Duration(v.GetElectionTimeout()))
+		l.info = info
+		l.expireTime = time.Now().Add(time.Duration(info.GetElectionTimeout()))
 	}
 	return nil
 }
@@ -175,7 +186,7 @@ func (l *leaderStateMachine) ExecuteForCheckpoint(uint64, []byte) error {
 }
 
 func (l *leaderStateMachine) GetCheckpointInstanceID() uint64 {
-	return l.leaderVersion
+	return l.info.GetVersion()
 }
 
 func (l *leaderStateMachine) LockCheckpointState() error {
