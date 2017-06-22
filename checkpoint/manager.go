@@ -15,10 +15,10 @@ package checkpoint
 
 import (
 	"errors"
-	"github.com/sosozhuang/paxos/comm"
-	"github.com/sosozhuang/paxos/storage"
+	"github.com/sosozhuang/go-paxos/comm"
+	"github.com/sosozhuang/go-paxos/storage"
 	"time"
-	"github.com/sosozhuang/paxos/logger"
+	"github.com/sosozhuang/go-paxos/logger"
 )
 
 var log = logger.GetLogger("checkpoint")

@@ -18,8 +18,8 @@ import (
 	"errors"
 	"fmt"
 	"github.com/gogo/protobuf/proto"
-	"github.com/sosozhuang/paxos/comm"
-	"github.com/sosozhuang/paxos/storage"
+	"github.com/sosozhuang/go-paxos/comm"
+	"github.com/sosozhuang/go-paxos/storage"
 	"math/rand"
 	"sync"
 )

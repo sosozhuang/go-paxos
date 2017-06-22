@@ -18,8 +18,8 @@ import (
 	"fmt"
 	"os"
 
-	"github.com/sosozhuang/paxos/comm"
-	"github.com/sosozhuang/paxos/paxosmain"
+	"github.com/sosozhuang/go-paxos/comm"
+	"github.com/sosozhuang/go-paxos/paxosmain"
 	"github.com/spf13/cobra"
 	"github.com/spf13/viper"
 	"time"

@@ -2,16 +2,16 @@ package http
 
 import (
 	"net/http"
-	"github.com/sosozhuang/paxos/logger"
+	"github.com/sosozhuang/go-paxos/logger"
 	"encoding/json"
 	"net/url"
-	"github.com/sosozhuang/paxos/comm"
+	"github.com/sosozhuang/go-paxos/comm"
 	"github.com/gorilla/mux"
 	"context"
 	"time"
 	defaultLog "log"
 	"io/ioutil"
-	"github.com/sosozhuang/paxos/storage"
+	"github.com/sosozhuang/go-paxos/storage"
 )
 
 var log = logger.GetLogger("http")

@@ -16,8 +16,8 @@ package checkpoint
 import (
 	"errors"
 	"fmt"
-	"github.com/sosozhuang/paxos/comm"
-	"github.com/sosozhuang/paxos/storage"
+	"github.com/sosozhuang/go-paxos/comm"
+	"github.com/sosozhuang/go-paxos/storage"
 	"os"
 	"path"
 	"strings"

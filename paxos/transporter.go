@@ -15,10 +15,10 @@ package paxos
 
 import (
 	"github.com/gogo/protobuf/proto"
-	"github.com/sosozhuang/paxos/comm"
+	"github.com/sosozhuang/go-paxos/comm"
 	"fmt"
-	"github.com/sosozhuang/paxos/network"
-	"github.com/sosozhuang/paxos/util"
+	"github.com/sosozhuang/go-paxos/network"
+	"github.com/sosozhuang/go-paxos/util"
 )
 
 type Transporter interface {

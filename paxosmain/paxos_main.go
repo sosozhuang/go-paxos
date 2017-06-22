@@ -1,12 +1,12 @@
 package paxosmain
 
 import (
-	"github.com/sosozhuang/paxos/logger"
-	"github.com/sosozhuang/paxos/node"
-	"github.com/sosozhuang/paxos/util"
+	"github.com/sosozhuang/go-paxos/logger"
+	"github.com/sosozhuang/go-paxos/node"
+	"github.com/sosozhuang/go-paxos/util"
 	"time"
 	"math/rand"
-	"github.com/sosozhuang/paxos/comm"
+	"github.com/sosozhuang/go-paxos/comm"
 	"runtime"
 )
 

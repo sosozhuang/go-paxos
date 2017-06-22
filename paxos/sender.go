@@ -15,7 +15,7 @@ package paxos
 
 import (
 	"errors"
-	"github.com/sosozhuang/paxos/checkpoint"
+	"github.com/sosozhuang/go-paxos/checkpoint"
 	"io"
 	"os"
 	"path"
@@ -23,7 +23,7 @@ import (
 	"sync/atomic"
 	"syscall"
 	"time"
-	"github.com/sosozhuang/paxos/util"
+	"github.com/sosozhuang/go-paxos/util"
 )
 
 type Sender interface {

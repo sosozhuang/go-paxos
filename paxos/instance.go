@@ -19,14 +19,14 @@ import (
 	"errors"
 	"fmt"
 	"github.com/gogo/protobuf/proto"
-	"github.com/sosozhuang/paxos/checkpoint"
-	"github.com/sosozhuang/paxos/comm"
-	"github.com/sosozhuang/paxos/logger"
-	"github.com/sosozhuang/paxos/storage"
+	"github.com/sosozhuang/go-paxos/checkpoint"
+	"github.com/sosozhuang/go-paxos/comm"
+	"github.com/sosozhuang/go-paxos/logger"
+	"github.com/sosozhuang/go-paxos/storage"
 	"sync"
 	"sync/atomic"
 	"time"
-	"github.com/sosozhuang/paxos/util"
+	"github.com/sosozhuang/go-paxos/util"
 )
 
 var (

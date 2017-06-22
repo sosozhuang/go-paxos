@@ -21,14 +21,14 @@ import (
 	"strconv"
 	"path"
 	"context"
-	"github.com/sosozhuang/paxos/comm"
+	"github.com/sosozhuang/go-paxos/comm"
 	"github.com/gogo/protobuf/proto"
 	"os"
 	"math"
 	"sync"
 	"math/rand"
 	"fmt"
-	"github.com/sosozhuang/paxos/util"
+	"github.com/sosozhuang/go-paxos/util"
 )
 
 type ldbs []*levelDB

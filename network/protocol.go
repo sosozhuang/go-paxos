@@ -1,8 +1,8 @@
 package network
 
 import (
-	"github.com/sosozhuang/paxos/comm"
-	"github.com/sosozhuang/paxos/util"
+	"github.com/sosozhuang/go-paxos/comm"
+	"github.com/sosozhuang/go-paxos/util"
 )
 
 var (

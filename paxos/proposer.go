@@ -16,8 +16,8 @@ package paxos
 import (
 	"context"
 	"github.com/gogo/protobuf/proto"
-	"github.com/sosozhuang/paxos/comm"
-	"github.com/sosozhuang/paxos/logger"
+	"github.com/sosozhuang/go-paxos/comm"
+	"github.com/sosozhuang/go-paxos/logger"
 	"sync"
 	"sync/atomic"
 	"time"

@@ -1,7 +1,7 @@
 package network
 
 import (
-	"github.com/sosozhuang/paxos/comm"
+	"github.com/sosozhuang/go-paxos/comm"
 	"io"
 	"net"
 	"sync"

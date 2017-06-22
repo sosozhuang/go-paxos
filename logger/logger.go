@@ -16,7 +16,7 @@ package logger
 import (
 	"fmt"
 	"github.com/Sirupsen/logrus"
-	"github.com/sosozhuang/paxos/util"
+	"github.com/sosozhuang/go-paxos/util"
 	"io/ioutil"
 	"log"
 	"os"

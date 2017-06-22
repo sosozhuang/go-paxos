@@ -14,8 +14,8 @@
 package storage
 
 import (
-	"github.com/sosozhuang/paxos/logger"
-	"github.com/sosozhuang/paxos/comm"
+	"github.com/sosozhuang/go-paxos/logger"
+	"github.com/sosozhuang/go-paxos/comm"
 	"github.com/gogo/protobuf/proto"
 	"fmt"
 	"context"

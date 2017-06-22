@@ -2,8 +2,8 @@ package network
 
 import (
 	"fmt"
-	"github.com/sosozhuang/paxos/comm"
-	"github.com/sosozhuang/paxos/logger"
+	"github.com/sosozhuang/go-paxos/comm"
+	"github.com/sosozhuang/go-paxos/logger"
 	"net"
 	"strconv"
 	"strings"

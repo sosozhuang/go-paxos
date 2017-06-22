@@ -19,7 +19,7 @@ import (
 	"path"
 	"runtime"
 	"strconv"
-	"github.com/sosozhuang/paxos/comm"
+	"github.com/sosozhuang/go-paxos/comm"
 	"context"
 	"sync"
 	"github.com/gogo/protobuf/proto"
@@ -27,7 +27,7 @@ import (
 	"math"
 	"math/rand"
 	"fmt"
-	"github.com/sosozhuang/paxos/util"
+	"github.com/sosozhuang/go-paxos/util"
 )
 
 type rdbs []*rocksDB

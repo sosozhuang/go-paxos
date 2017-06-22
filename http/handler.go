@@ -3,13 +3,13 @@ package http
 import (
 	"net/http"
 	"io"
-	"github.com/sosozhuang/paxos/comm"
+	"github.com/sosozhuang/go-paxos/comm"
 	"github.com/gorilla/mux"
 	"encoding/json"
 	"strconv"
 	"io/ioutil"
 	"github.com/gogo/protobuf/proto"
-	"github.com/sosozhuang/paxos/storage"
+	"github.com/sosozhuang/go-paxos/storage"
 )
 
 func indexHandler(w http.ResponseWriter, r *http.Request) {
