@@ -18,6 +18,7 @@ import (
 	"math"
 	"time"
 	"unsafe"
+	"errors"
 )
 
 const (
@@ -33,6 +34,18 @@ const (
 const (
 	ClusterStateMachineID uint32 = 100000000 + iota
 	LeaderStateMachineID
+	KVStoreStateMachineID
+)
+
+var (
+	ErrClusterUninitialized  = errors.New("group: cluster uninitialized")
+	ErrMemberExists          = errors.New("group: member already exists")
+	ErrMemberNotExists       = errors.New("group: member not exists")
+	ErrMemberNotModified     = errors.New("group: member not modified")
+	ErrMemberNameEmpty       = errors.New("group: empty member name")
+	ErrMemberAddrEmpty       = errors.New("group: empty member address")
+	ErrMemberServiceUrlEmpty = errors.New("group: empty member service url")
+
 )
 
 type Receiver interface {
@@ -52,12 +65,21 @@ type NetWork interface {
 
 type Node interface {
 	Receiver
-	Propose(uint16, uint32, []byte) error
-	ProposeWithTimeout(uint16, uint32, []byte, time.Duration) error
-	ProposeWithCtx(context.Context, uint16, uint32, []byte) error
-	ProposeWithCtxTimeout(context.Context, uint16, uint32, []byte, time.Duration) error
+	Proposer
 	GetNodeID() uint64
-	GetLeader(uint16) (Member, error)
+	GetLeader() Member
+	IsLeader() bool
+	GetMembers() (map[uint64]Member, error)
+	AddMember(Member) error
+	UpdateMember(Member, Member) error
+	RemoveMember(Member) error
+}
+
+type Membership interface {
+	GetMembers() (map[uint64]Member, error)
+	AddMember(Member) error
+	UpdateMember(Member, Member) error
+	RemoveMember(Member) error
 }
 
 type Proposer interface {
@@ -111,17 +133,17 @@ type Group interface {
 	Propose(context.Context, uint32, []byte) (<-chan Result, error)
 	BatchPropose(context.Context, uint32, []byte, uint32) (<-chan Result, error)
 	GetCurrentInstanceID() uint64
-	GetNodeCount() int
 	PauseReplayer()
 	ContinueReplayer()
 	PauseCleaner()
 	ContinueCleaner()
 	SetMaxLogCount(int64)
-	GetMembers() map[uint64]Member
+	GetMemberCount() int
+	GetMembers() (map[uint64]Member, error)
 	SetMembers(map[uint64]Member)
 	AddMember(context.Context, Member) (<-chan Result, error)
 	RemoveMember(context.Context, Member) (<-chan Result, error)
-	ChangeMember(context.Context, Member, Member) (<-chan Result, error)
+	UpdateMember(context.Context, Member, Member) (<-chan Result, error)
 }
 
 type Instance interface {
