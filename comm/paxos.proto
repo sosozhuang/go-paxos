@@ -1,0 +1,118 @@
+syntax = "proto2";
+package comm;
+//protoc --go_out=. *.proto
+enum MsgType {
+    Paxos = 0;
+    Checkpoint = 1;
+}
+
+message Header {
+    required uint64 ClusterID = 1;
+    required MsgType Type = 2;
+    optional int32 Version = 3;
+};
+
+enum PaxosMsgType {
+    // for proposer
+    NewValue = 1;
+    PrepareReply = 2;
+    AcceptReply = 3;
+    // for acceptor
+    Prepare = 4;
+    Accept = 5;
+    // for learner
+    ProposalFinished = 6;
+    AskForLearn = 7;
+    ConfirmAskForLearn = 8;
+    SendValue = 9;
+    AckSendValue = 10;
+    SendInstanceID = 11;
+    AskForCheckpoint = 12;
+}
+
+message PaxosMsg {
+    required PaxosMsgType Type = 1;
+    optional uint64 InstanceID = 2;
+    optional uint64 NodeID = 3;
+    optional uint64 ProposalID = 4;
+    optional uint64 ProposalNodeID = 5;
+    optional bytes Value = 6;
+    optional uint64 PreAcceptID = 7;
+    optional uint64 PreAcceptNodeID = 8;
+    optional uint64 RejectByPromiseID = 9;
+    optional uint64 CurInstanceID = 10;
+    optional uint64 MinChosenInstanceID = 11;
+    optional uint32 Checksum = 12;
+    optional bool AckFlag = 13;
+    optional bytes ClusterInfo = 14;
+    optional bytes LeaderInfo = 15;
+};
+
+enum CheckpointMsgType {
+    SendFile = 0;
+    AckSendFile = 1;
+}
+
+enum CheckPointMsgFlag {
+    Begin = 0;
+    Progressing = 1;
+    End = 2;
+    Successful = 3;
+    Failed = 4;
+}
+
+message CheckpointMsg {
+    required CheckpointMsgType Type = 1;
+    required uint64 NodeID = 2;
+    optional CheckPointMsgFlag Flag = 3;
+    required uint64 UUID = 4;
+    required uint64 Sequence = 5;
+    optional uint64 CheckpointInstanceID = 6;
+    optional uint32 Checksum = 7;
+    optional string FilePath = 8;
+    optional uint32 SMID = 9;
+    optional int64 Offset = 10;
+    optional bytes Bytes = 11;
+}
+
+message AcceptorState {
+    required uint64 InstanceID = 1;
+    required uint64 PromisedID = 2;
+    required uint64 PromisedNodeID = 3;
+    required uint64 AcceptedID = 4;
+    required uint64 AcceptedNodeID = 5;
+    optional bytes AcceptedValue = 6;
+    required uint32 Checksum = 7;
+};
+
+message Member {
+    required uint64 NodeID = 1;
+    required string Name = 2;
+    required string Addr = 3;
+    optional string ServiceUrl = 4;
+};
+
+message ClusterInfo {
+    required uint64 ClusterID = 1;
+    repeated Member Members = 2;
+    required uint64 Version = 3;
+};
+
+message LeaderInfo {
+    required Member Leader = 1;
+    required uint64 Version = 2;
+    required int64 ElectionTimeout = 3;
+};
+
+enum Action {
+    Set = 0;
+    Get = 1;
+    Update = 2;
+    Delete = 3;
+}
+
+message KeyValue {
+    required Action Action = 1;
+    required bytes Key = 2;
+    optional bytes Value = 3;
+}
