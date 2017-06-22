@@ -18,10 +18,10 @@ import (
 	"fmt"
 	"os"
 
+	"github.com/sosozhuang/paxos/comm"
+	"github.com/sosozhuang/paxos/paxosmain"
 	"github.com/spf13/cobra"
 	"github.com/spf13/viper"
-	"github.com/sosozhuang/paxos/paxosmain"
-	"github.com/sosozhuang/paxos/comm"
 	"time"
 )
 
@@ -30,52 +30,44 @@ var cfgFile string
 // RootCmd represents the base command when called without any subcommands
 var RootCmd = &cobra.Command{
 	Use:   "paxos",
-	Short: "A brief description of your application",
-	Long: `A longer description that spans multiple lines and likely contains
-examples and usage of using your application. For example:
-
-Cobra is a CLI library for Go that empowers applications.
-This application is a tool to generate the needed files
-to quickly create a Cobra application.`,
+	Short: "A paxos implementation of go",
 	Run: func(cmd *cobra.Command, args []string) {
 		cfg := &comm.Config{
-			Name: viper.GetString("name"),
-			GroupCount: viper.GetInt("group-count"),
-			Members: viper.GetString("members"),
-			EnableMembership: viper.GetBool("membership"),
+			Name:            viper.GetString("name"),
+			GroupCount:      viper.GetInt("group-count"),
+			Members:         viper.GetString("members"),
 			ForceNewMembers: viper.GetBool("force-new-members"),
-			FollowerMode: viper.GetBool("follower-mode"),
-			FollowNode: viper.GetString("follow-node"),
-			ProposeTimeout: viper.GetDuration("propose-timeout") * time.Millisecond,
+			FollowerMode:    viper.GetBool("follower-mode"),
+			FollowNode:      viper.GetString("follow-node"),
+			ProposeTimeout:  viper.GetDuration("propose-timeout") * time.Millisecond,
 
-			DataDir: viper.GetString("data-dir"),
+			DataDir:     viper.GetString("data-dir"),
 			StorageType: viper.GetString("storage"),
-			Sync: viper.GetBool("sync"),
-			SyncPeriod: viper.GetDuration("sync-period") * time.Millisecond,
-			SyncCount: viper.GetInt("sync-count"),
+			Sync:        viper.GetBool("sync"),
+			SyncPeriod:  viper.GetDuration("sync-period") * time.Millisecond,
+			SyncCount:   viper.GetInt("sync-count"),
 			MaxLogCount: viper.GetInt64("max-log-count"),
 
-			Token: viper.GetString("token"),
-			ListenMode: viper.GetString("listen-mode"),
-			AdvertiseIP: viper.GetString("advertise-ip"),
-			ListenPeerIP: viper.GetString("listen-peer-ip"),
+			Token:          viper.GetString("token"),
+			ListenMode:     viper.GetString("listen-mode"),
+			AdvertiseIP:    viper.GetString("advertise-ip"),
+			ListenPeerIP:   viper.GetString("listen-peer-ip"),
 			ListenPeerPort: viper.GetInt("listen-peer-port"),
-			ListenTimeout: viper.GetDuration("listen-timeout") * time.Millisecond,
-			DialTimeout: viper.GetDuration("dial-timeout") * time.Millisecond,
-			WriteTimeout: viper.GetDuration("write-timeout") * time.Millisecond,
-			ReadTimeout: viper.GetDuration("read-timeout") * time.Millisecond,
-			KeepAlive: viper.GetDuration("keepalive-period") * time.Second,
-			ServerChanCap: viper.GetInt("server-capacity"),
-			ClientChanCap: viper.GetInt("client-capacity"),
+			ListenTimeout:  viper.GetDuration("listen-timeout") * time.Millisecond,
+			DialTimeout:    viper.GetDuration("dial-timeout") * time.Millisecond,
+			WriteTimeout:   viper.GetDuration("write-timeout") * time.Millisecond,
+			ReadTimeout:    viper.GetDuration("read-timeout") * time.Millisecond,
+			KeepAlive:      viper.GetDuration("keepalive-period") * time.Second,
+			ServerChanCap:  viper.GetInt("server-capacity"),
+			ClientChanCap:  viper.GetInt("client-capacity"),
 
-			ListenClientAddr: viper.GetString("listen-client-addr"),
+			ServiceUrl: viper.GetString("service-url"),
 
-			EnableElection: viper.GetBool("election"),
 			ElectionTimeout: viper.GetDuration("election-timeout") * time.Second,
 
-			LogDir: viper.GetString("log-dir"),
+			LogDir:    viper.GetString("log-dir"),
 			LogOutput: viper.GetString("log-output"),
-			LogLevel: viper.GetString("log-level"),
+			LogLevel:  viper.GetString("log-level"),
 			LogAppend: viper.GetBool("log-append"),
 		}
 
@@ -105,7 +97,6 @@ func init() {
 	flags.String("name", comm.DefaultName, "readable name for this member")
 	flags.Int("group-count", comm.DefaultGroupCount, "number of group")
 	flags.String("members", comm.DefaultMembers, "initial cluster members for bootstrapping (comma-separated)")
-	flags.Bool("membership", comm.DefaultMembership, "enable cluster membership")
 	flags.Bool("force-new-members", comm.DefaultForceNewMembers, "force to create new cluster members")
 	flags.Bool("follower-mode", comm.DefaultFollowerMode, "enable follower mode")
 	flags.String("follow-node", comm.DefaultFollowNode, "node address to follow if 'follower-mode' is true")
@@ -132,9 +123,8 @@ func init() {
 	flags.Int("server-capacity", comm.DefaultServerCap, "buffer capacity for server receive message channel")
 	flags.Int("client-capacity", comm.DefaultClientCap, "buffer capacity for client send message channel")
 
-	flags.String("listen-client-addr", comm.DefaultListenClientAddr, "address to listen on for clients' traffic")
+	flags.String("service-url", comm.DefaultServiceUrl, "http(s) service url to listen on for clients' traffic")
 
-	flags.Bool("election", comm.DefaultElection, "enable leader election")
 	flags.Int("election-timeout", comm.DefaultElectionTimeout, "time (in milliseconds) for an election to timeout")
 
 	flags.String("log-dir", comm.DefaultLogDir, "path to the log directory")
@@ -155,7 +145,7 @@ func initConfig() {
 	}
 
 	viper.SetEnvPrefix("paxos")
-	viper.AutomaticEnv()          // read in environment variables that match
+	viper.AutomaticEnv() // read in environment variables that match
 
 	// If a config file is found, read it in.
 	if err := viper.ReadInConfig(); err != nil {
