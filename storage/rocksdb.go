@@ -11,7 +11,7 @@
 // WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 // See the License for the specific language governing permissions and
 // limitations under the License.
-package store
+package storage
 
 import (
 	"errors"
@@ -27,6 +27,7 @@ import (
 	"math"
 	"math/rand"
 	"fmt"
+	"github.com/sosozhuang/paxos/util"
 )
 
 type rdbs []*rocksDB
@@ -45,12 +46,12 @@ type comparator struct{}
 
 func (*comparator) Compare(a, b []byte) int {
 	var i, j uint64
-	if err := comm.BytesToObject(a, &i); err != nil {
-		log.Error("Comparator convert", a, "to uint64 error:", err)
+	if err := util.BytesToObject(a, &i); err != nil {
+		log.Error("Comparator convert", a, "to uint64:", err)
 		return 0
 	}
-	if err := comm.BytesToObject(b, &j); err != nil {
-		log.Error("Comparator convert", b, "to uint64 error:", err)
+	if err := util.BytesToObject(b, &j); err != nil {
+		log.Error("Comparator convert", b, "to uint64:", err)
 		return 0
 	}
 	if i == j {
@@ -112,6 +113,7 @@ func (rs rdbs) Open(ctx context.Context, stopped <-chan struct{}) error {
 		return ctx.Err()
 	case err, ok := <-ch:
 		if !ok {
+			log.Debug("Rocksdb group storage opened.")
 			return nil
 		}
 		return err
@@ -124,6 +126,7 @@ func (rs rdbs) Close() {
 			db.close()
 		}
 	}
+	log.Debug("Rocksdb group storage closed.")
 }
 
 func (rs rdbs) GetStorage(id uint16) Storage {
@@ -172,13 +175,13 @@ func (r *rocksDB) GetDir() string{
 }
 
 func (r *rocksDB) Get(instanceID uint64) ([]byte, error) {
-	key, err := comm.ObjectToBytes(instanceID)
+	key, err := util.ObjectToBytes(instanceID)
 	if err != nil {
-		return nil, fmt.Errorf("rocksdb: convert %d to bytes error: %v", instanceID, err)
+		return nil, fmt.Errorf("rocksdb: convert %d to bytes: %v", instanceID, err)
 	}
 	v, err := r.DB.Get(r.ReadOptions, key)
 	if err != nil {
-		return nil, fmt.Errorf("rocksdb: get value error: %v", err)
+		return nil, fmt.Errorf("rocksdb: get value: %v", err)
 	}
 	defer v.Free()
 	if v.Size() == 0 {
@@ -189,7 +192,7 @@ func (r *rocksDB) Get(instanceID uint64) ([]byte, error) {
 		return nil, err
 	}
 	if id != instanceID {
-		return nil, errors.New("rocksdb: instance id inconsistent")
+		return nil, errInstanceIDNotMatched
 	}
 	return value, nil
 }
@@ -199,24 +202,24 @@ func (r *rocksDB) Set(instanceID uint64, value []byte) error {
 	if err != nil {
 		return err
 	}
-	key, err := comm.ObjectToBytes(instanceID)
+	key, err := util.ObjectToBytes(instanceID)
 	if err != nil {
-		return fmt.Errorf("rocksdb: convert %d to bytes error: %v", instanceID, err)
+		return fmt.Errorf("rocksdb: convert %d to bytes: %v", instanceID, err)
 	}
 	if err = r.DB.Put(r.WriteOptions, key, v); err != nil {
-		return fmt.Errorf("rocksdb: set value error: %v", err)
+		return fmt.Errorf("rocksdb: set value: %v", err)
 	}
 	return nil
 }
 
 func (r *rocksDB) Delete(instanceID uint64) error {
-	key, err := comm.ObjectToBytes(instanceID)
+	key, err := util.ObjectToBytes(instanceID)
 	if err != nil {
-		return fmt.Errorf("rocksdb: convert %d to bytes error: %v", instanceID, err)
+		return fmt.Errorf("rocksdb: convert %d to bytes: %v", instanceID, err)
 	}
 	value, err := r.DB.Get(r.ReadOptions, key)
 	if err != nil {
-		return fmt.Errorf("rocksdb: get value error: %v", err)
+		return fmt.Errorf("rocksdb: get value: %v", err)
 	}
 	defer value.Free()
 	if value.Size() == 0 {
@@ -230,19 +233,19 @@ func (r *rocksDB) Delete(instanceID uint64) error {
 	}
 
 	if err = r.DB.Delete(r.WriteOptions, key); err != nil {
-		return fmt.Errorf("rocksdb: delete value error: %v", err)
+		return fmt.Errorf("rocksdb: delete value: %v", err)
 	}
 	return nil
 }
 
 func (r *rocksDB) ForceDelete(instanceID uint64) error {
-	key, err := comm.ObjectToBytes(instanceID)
+	key, err := util.ObjectToBytes(instanceID)
 	if err != nil {
-		return fmt.Errorf("rocksdb: convert %d to bytes error: %v", instanceID, err)
+		return fmt.Errorf("rocksdb: convert %d to bytes: %v", instanceID, err)
 	}
 	value, err := r.DB.Get(r.ReadOptions, key)
 	if err != nil {
-		return fmt.Errorf("rocksdb: get value error: %v", err)
+		return fmt.Errorf("rocksdb: get value: %v", err)
 	}
 	defer value.Free()
 	if value.Size() == 0 {
@@ -254,7 +257,7 @@ func (r *rocksDB) ForceDelete(instanceID uint64) error {
 	}
 
 	if err = r.DB.Delete(r.WriteOptions, key); err != nil {
-		return fmt.Errorf("rocksdb: delete value error: %v", err)
+		return fmt.Errorf("rocksdb: delete value: %v", err)
 	}
 	return nil
 }
@@ -264,9 +267,9 @@ func (r *rocksDB) GetMaxInstanceID() (instanceID uint64, err error) {
 	defer it.Close()
 	for it.SeekToLast(); it.Valid(); it.Prev() {
 		key := it.Key()
-		if err = comm.BytesToObject(key.Data(), &instanceID); err != nil {
+		if err = util.BytesToObject(key.Data(), &instanceID); err != nil {
 			key.Free()
-			err = fmt.Errorf("rocksdb: convert bytes to instance id error: %v", err)
+			err = fmt.Errorf("rocksdb: convert bytes to instance id: %v", err)
 			return
 		}
 		key.Free()
@@ -282,12 +285,12 @@ func (r *rocksDB) GetMaxInstanceID() (instanceID uint64, err error) {
 }
 
 func (r *rocksDB) SetMinChosenInstanceID(instanceID uint64) error {
-	value, err := comm.ObjectToBytes(instanceID)
+	value, err := util.ObjectToBytes(instanceID)
 	if err != nil {
-		return fmt.Errorf("rocksdb: convert %d to bytes error: %v", instanceID, err)
+		return fmt.Errorf("rocksdb: convert %d to bytes: %v", instanceID, err)
 	}
 	if err = r.DB.Put(r.WriteOptions, minChosenKey, value); err != nil {
-		return fmt.Errorf("rocksdb: set value error: %v", err)
+		return fmt.Errorf("rocksdb: set value: %v", err)
 	}
 	return nil
 }
@@ -296,106 +299,106 @@ func (r *rocksDB) GetMinChosenInstanceID() (uint64, error) {
 	var instanceID uint64
 	value, err := r.DB.Get(r.ReadOptions, minChosenKey)
 	if err != nil {
-		return instanceID, fmt.Errorf("rocksdb: get value error: %v", err)
+		return instanceID, fmt.Errorf("rocksdb: get value: %v", err)
 	}
 	defer value.Free()
 	if value.Size() == 0 {
 		return instanceID, nil
 	}
-	if err = comm.BytesToObject(value.Data(), &instanceID); err != nil {
-		return instanceID, fmt.Errorf("rocksdb: convert bytes to instance id error: %v", err)
+	if err = util.BytesToObject(value.Data(), &instanceID); err != nil {
+		return instanceID, fmt.Errorf("rocksdb: convert bytes to instance id: %v", err)
 	}
 	return instanceID, nil
 }
 
 func (r *rocksDB) Recreate() error {
-	sv, err := r.GetSystemVar()
+	ci, err := r.GetClusterInfo()
 	if err != nil && err != ErrNotFound {
 		return err
 	}
-	mv, err := r.GetMasterVar()
+	li, err := r.GetLeaderInfo()
 	if err != nil && err != ErrNotFound {
 		return err
 	}
 	backup := path.Clean(r.dir) + ".bak"
 	if err = os.RemoveAll(backup); err != nil && !os.IsNotExist(err) {
-		return fmt.Errorf("rocksdb: remove %s error: %v", backup, err)
+		return fmt.Errorf("rocksdb: remove %s: %v", backup, err)
 	}
 	if err = os.Rename(r.dir, backup); err != nil {
-		return fmt.Errorf("rocksdb: rename %s to %s error: %v", r.dir, backup, err)
+		return fmt.Errorf("rocksdb: rename %s to %s: %v", r.dir, backup, err)
 	}
 
 	r.closeDB()
 	r.DB, err = gorocksdb.OpenDb(r.Options, r.dir)
 	if err != nil {
-		return fmt.Errorf("rocksdb: open db error: %v", err)
+		return fmt.Errorf("rocksdb: open db: %v", err)
 	}
 	r.logStore, err = newLogStore(r.dir, r)
 	if err != nil {
 		return err
 	}
 
-	if sv != nil {
-		if err = r.SetSystemVar(sv); err != nil {
+	if ci != nil {
+		if err = r.SetClusterInfo(ci); err != nil {
 			return err
 		}
 	}
-	if mv != nil {
-		if err = r.SetMasterVar(mv); err != nil {
+	if li != nil {
+		if err = r.SetLeaderInfo(li); err != nil {
 			return err
 		}
 	}
 	return nil
 }
 
-func (r *rocksDB) SetSystemVar(v *comm.SystemVar) error {
+func (r *rocksDB) SetClusterInfo(v *comm.ClusterInfo) error {
 	value, err := proto.Marshal(v)
 	if err != nil {
-		return fmt.Errorf("rocksdb: marshal system var error: %v", err)
+		return fmt.Errorf("rocksdb: marshal cluster info: %v", err)
 	}
-	if err = r.DB.Put(r.WriteOptions, systemVarKey, value); err != nil {
-		return fmt.Errorf("rocksdb: set value error: %v", err)
+	if err = r.DB.Put(r.WriteOptions, clusterInfoKey, value); err != nil {
+		return fmt.Errorf("rocksdb: set value: %v", err)
 	}
 	return nil
 }
 
-func (r *rocksDB) GetSystemVar() (*comm.SystemVar, error) {
-	value, err := r.DB.Get(r.ReadOptions, systemVarKey)
+func (r *rocksDB) GetClusterInfo() (*comm.ClusterInfo, error) {
+	value, err := r.DB.Get(r.ReadOptions, clusterInfoKey)
 	if err != nil {
-		return nil, fmt.Errorf("rocksdb: get value error: %v", err)
+		return nil, fmt.Errorf("rocksdb: get value: %v", err)
 	}
 	defer value.Free()
 	if value.Size() == 0 {
 		return nil, ErrNotFound
 	}
-	v := &comm.SystemVar{}
+	v := &comm.ClusterInfo{}
 	if err := proto.Unmarshal(value.Data(), v); err != nil {
-		return nil, fmt.Errorf("rocksdb: unmarshal system var error: %v", err)
+		return nil, fmt.Errorf("rocksdb: unmarshal cluster info: %v", err)
 	}
 	return v, nil
 }
-func (r *rocksDB) SetMasterVar(v *comm.MasterVar) error {
+func (r *rocksDB) SetLeaderInfo(v *comm.LeaderInfo) error {
 	value, err := proto.Marshal(v)
 	if err != nil {
-		return fmt.Errorf("rocksdb: marshal master var error: %v", err)
+		return fmt.Errorf("rocksdb: marshal leader info: %v", err)
 	}
-	if err = r.DB.Put(r.WriteOptions, masterVarKey, value); err != nil {
-		return fmt.Errorf("rocksdb: set value error: %v", err)
+	if err = r.DB.Put(r.WriteOptions, leaderInfoKey, value); err != nil {
+		return fmt.Errorf("rocksdb: set value: %v", err)
 	}
 	return nil
 }
-func (r *rocksDB) GetMasterVar() (*comm.MasterVar, error) {
-	value, err := r.DB.Get(r.ReadOptions, masterVarKey)
+func (r *rocksDB) GetLeaderInfo() (*comm.LeaderInfo, error) {
+	value, err := r.DB.Get(r.ReadOptions, leaderInfoKey)
 	if err != nil {
-		return nil, fmt.Errorf("rocksdb: get value error: %v", err)
+		return nil, fmt.Errorf("rocksdb: get value: %v", err)
 	}
 	defer value.Free()
 	if value.Size() == 0 {
 		return nil, ErrNotFound
 	}
-	v := &comm.MasterVar{}
+	v := &comm.LeaderInfo{}
 	if err := proto.Unmarshal(value.Data(), v); err != nil {
-		return nil, fmt.Errorf("rocksdb: unmarshal master var error: %v", err)
+		return nil, fmt.Errorf("rocksdb: unmarshal leader info: %v", err)
 	}
 	return v, nil
 }
@@ -427,14 +430,14 @@ func (r *rocksDB) GetMaxInstanceIDFileID() (instanceID uint64, value []byte, err
 	}
 
 	var key []byte
-	key, err = comm.ObjectToBytes(instanceID)
+	key, err = util.ObjectToBytes(instanceID)
 	if err != nil {
-		err = fmt.Errorf("rocksdb: convert %d to bytes error: %v", instanceID, err)
+		err = fmt.Errorf("rocksdb: convert %d to bytes: %v", instanceID, err)
 		return
 	}
 	v, err := r.DB.Get(r.ReadOptions, key)
 	if err != nil {
-		err = fmt.Errorf("rocksdb: get value error: %v", err)
+		err = fmt.Errorf("rocksdb: get value: %v", err)
 		return
 	}
 	defer v.Free()
@@ -448,12 +451,12 @@ func (r *rocksDB) GetMaxInstanceIDFileID() (instanceID uint64, value []byte, err
 }
 
 func (r *rocksDB) RebuildOneIndex(instanceID uint64, value []byte) error {
-	key, err := comm.ObjectToBytes(instanceID)
+	key, err := util.ObjectToBytes(instanceID)
 	if err != nil {
-		return fmt.Errorf("rocksdb: convert %d to bytes error: %v", instanceID, err)
+		return fmt.Errorf("rocksdb: convert %d to bytes: %v", instanceID, err)
 	}
 	if err = r.DB.Put(r.WriteOptions, key, value); err != nil {
-		return fmt.Errorf("rocksdb: set value error: %v", err)
+		return fmt.Errorf("rocksdb: set value: %v", err)
 	}
 	return nil
 }

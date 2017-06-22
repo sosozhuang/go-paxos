@@ -11,7 +11,7 @@
 // WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 // See the License for the specific language governing permissions and
 // limitations under the License.
-package store
+package storage
 
 import (
 	"github.com/syndtr/goleveldb/leveldb"
@@ -28,6 +28,7 @@ import (
 	"sync"
 	"math/rand"
 	"fmt"
+	"github.com/sosozhuang/paxos/util"
 )
 
 type ldbs []*levelDB
@@ -88,6 +89,7 @@ func (ls ldbs) Open(ctx context.Context, stopped <-chan struct{}) error {
 	go func() {
 		wg.Wait()
 		close(ch)
+		log.Debug("Leveldb group storage opened.")
 	}()
 
 	select {
@@ -109,6 +111,7 @@ func (ls ldbs) Close() {
 			db.close()
 		}
 	}
+	log.Debug("Leveldb group storage closed.")
 }
 
 func (ls ldbs) GetStorage(id uint16) Storage {
@@ -155,23 +158,23 @@ func (l *levelDB) GetDir() string{
 }
 
 func (l *levelDB) Get(instanceID uint64) ([]byte, error) {
-	key, err := comm.ObjectToBytes(instanceID)
+	key, err := util.ObjectToBytes(instanceID)
 	if err != nil {
-		return nil, fmt.Errorf("leveldb: convert %d to bytes error: %v", instanceID, err)
+		return nil, fmt.Errorf("leveldb: convert %d to bytes: %v", instanceID, err)
 	}
 	value, err := l.DB.Get(key, l.ReadOptions)
 	if err == leveldb.ErrNotFound {
 		return nil, ErrNotFound
 	}
 	if err != nil {
-		return nil, fmt.Errorf("leveldb: get value error: %v", err)
+		return nil, fmt.Errorf("leveldb: get value: %v", err)
 	}
 	id, value, err := l.logStore.read(value)
 	if err != nil {
 		return nil, err
 	}
 	if id != instanceID {
-		return nil, errors.New("leveldb: instance id inconsistent")
+		return nil, errInstanceIDNotMatched
 	}
 	return value, nil
 }
@@ -181,27 +184,27 @@ func (l *levelDB) Set(instanceID uint64, value []byte) error {
 	if err != nil {
 		return err
 	}
-	key, err := comm.ObjectToBytes(instanceID)
+	key, err := util.ObjectToBytes(instanceID)
 	if err != nil {
-		return fmt.Errorf("leveldb: convert %d to bytes error: %v", instanceID, err)
+		return fmt.Errorf("leveldb: convert %d to bytes: %v", instanceID, err)
 	}
 	if err = l.DB.Put(key, v, l.WriteOptions); err != nil {
-		return fmt.Errorf("leveldb: set value error: %v", err)
+		return fmt.Errorf("leveldb: set value: %v", err)
 	}
 	return nil
 }
 
 func (l *levelDB) Delete(instanceID uint64) error {
-	key, err := comm.ObjectToBytes(instanceID)
+	key, err := util.ObjectToBytes(instanceID)
 	if err != nil {
-		return fmt.Errorf("leveldb: convert %d to bytes error: %v", instanceID, err)
+		return fmt.Errorf("leveldb: convert %d to bytes: %v", instanceID, err)
 	}
 	value, err := l.DB.Get(key, l.ReadOptions)
 	if err == leveldb.ErrNotFound {
 		return nil
 	}
 	if err != nil {
-		return fmt.Errorf("leveldb: get value error: %v", err)
+		return fmt.Errorf("leveldb: get value: %v", err)
 	}
 
 	if rand.Uint32() % 100 < 1 {
@@ -211,13 +214,13 @@ func (l *levelDB) Delete(instanceID uint64) error {
 	}
 
 	if err = l.DB.Delete(key, l.WriteOptions); err != nil {
-		return fmt.Errorf("leveldb: delete value error: %v", err)
+		return fmt.Errorf("leveldb: delete value: %v", err)
 	}
 	return nil
 }
 
 func (l *levelDB) ForceDelete(instanceID uint64) error {
-	key, err := comm.ObjectToBytes(instanceID)
+	key, err := util.ObjectToBytes(instanceID)
 	if err != nil {
 		return err
 	}
@@ -226,7 +229,7 @@ func (l *levelDB) ForceDelete(instanceID uint64) error {
 		return nil
 	}
 	if err != nil {
-		return fmt.Errorf("leveldb: get value error: %v", err)
+		return fmt.Errorf("leveldb: get value: %v", err)
 	}
 
 	if err = l.logStore.truncate(value); err != nil {
@@ -234,7 +237,7 @@ func (l *levelDB) ForceDelete(instanceID uint64) error {
 	}
 
 	if err = l.DB.Delete(key, l.WriteOptions); err != nil {
-		return fmt.Errorf("leveldb: delete value error: %v", err)
+		return fmt.Errorf("leveldb: delete value: %v", err)
 	}
 	return nil
 }
@@ -243,8 +246,8 @@ func (l *levelDB) GetMaxInstanceID() (instanceID uint64, err error) {
 	it := l.NewIterator(nil, l.ReadOptions)
 	defer it.Release()
 	for it.Last(); it.Valid(); it.Prev() {
-		if err = comm.BytesToObject(it.Key(), &instanceID); err != nil {
-			err = fmt.Errorf("leveldb: convert bytes to instance id error: %v", err)
+		if err = util.BytesToObject(it.Key(), &instanceID); err != nil {
+			err = fmt.Errorf("leveldb: convert bytes to instance id: %v", err)
 			return
 		}
 		if instanceID != math.MaxUint64 &&
@@ -258,12 +261,12 @@ func (l *levelDB) GetMaxInstanceID() (instanceID uint64, err error) {
 	return
 }
 func (l *levelDB) SetMinChosenInstanceID(instanceID uint64) error {
-	value, err := comm.ObjectToBytes(instanceID)
+	value, err := util.ObjectToBytes(instanceID)
 	if err != nil {
-		return fmt.Errorf("leveldb: convert %d to bytes error: %v", instanceID, err)
+		return fmt.Errorf("leveldb: convert %d to bytes: %v", instanceID, err)
 	}
 	if err = l.DB.Put(minChosenKey, value, l.WriteOptions); err != nil {
-		return fmt.Errorf("leveldb: set value error: %v", err)
+		return fmt.Errorf("leveldb: set value: %v", err)
 	}
 	return nil
 }
@@ -275,102 +278,102 @@ func (l *levelDB) GetMinChosenInstanceID() (uint64, error) {
 		return instanceID, nil
 	}
 	if err != nil {
-		return instanceID, fmt.Errorf("leveldb: get value error: %v", err)
+		return instanceID, fmt.Errorf("leveldb: get value: %v", err)
 	}
-	if err = comm.BytesToObject(value, &instanceID); err != nil {
-		return instanceID, fmt.Errorf("level: convert bytes to instance id error: %v", err)
+	if err = util.BytesToObject(value, &instanceID); err != nil {
+		return instanceID, fmt.Errorf("level: convert bytes to instance id: %v", err)
 	}
 	return instanceID, nil
 }
 
 func (l *levelDB) Recreate() error {
-	sv, err := l.GetSystemVar()
+	ci, err := l.GetClusterInfo()
 	if err != nil && err != ErrNotFound {
 		return err
 	}
-	mv, err := l.GetMasterVar()
+	li, err := l.GetLeaderInfo()
 	if err != nil && err != ErrNotFound {
 		return err
 	}
 	backup := path.Clean(l.dir) + ".bak"
 	if err = os.RemoveAll(backup); err != nil && !os.IsNotExist(err) {
-		return fmt.Errorf("rocksdb: remove %s error: %v", backup, err)
+		return fmt.Errorf("leveldb: remove %s: %v", backup, err)
 	}
 	if err = os.Rename(l.dir, backup); err != nil {
-		return fmt.Errorf("rocksdb: rename %s to %s error: %v", l.dir, backup, err)
+		return fmt.Errorf("leveldb: rename %s to %s: %v", l.dir, backup, err)
 	}
 
 	l.close()
 	l.DB, err = leveldb.OpenFile(l.dir, l.Options)
 	if err != nil {
-		return fmt.Errorf("leveldb: open db error: %v", err)
+		return fmt.Errorf("leveldb: open db: %v", err)
 	}
 	l.logStore, err = newLogStore(l.dir, l)
 	if err != nil {
 		return err
 	}
 
-	if sv != nil {
-		if err = l.SetSystemVar(sv); err != nil {
+	if ci != nil {
+		if err = l.SetClusterInfo(ci); err != nil {
 			return err
 		}
 	}
-	if mv != nil {
-		if err = l.SetMasterVar(mv); err != nil {
+	if li != nil {
+		if err = l.SetLeaderInfo(li); err != nil {
 			return err
 		}
 	}
 	return nil
 }
 
-func (l *levelDB) SetSystemVar(v *comm.SystemVar) error {
+func (l *levelDB) SetClusterInfo(v *comm.ClusterInfo) error {
 	value, err := proto.Marshal(v)
 	if err != nil {
-		return fmt.Errorf("leveldb: marshal system var error: %v", err)
+		return fmt.Errorf("leveldb: marshal cluster info: %v", err)
 	}
-	if err = l.DB.Put(systemVarKey, value, l.WriteOptions); err != nil {
-		return fmt.Errorf("leveldb: set value error: %v", err)
+	if err = l.DB.Put(clusterInfoKey, value, l.WriteOptions); err != nil {
+		return fmt.Errorf("leveldb: set value: %v", err)
 	}
 	return nil
 }
 
-func (l *levelDB) GetSystemVar() (*comm.SystemVar, error) {
-	value, err := l.DB.Get(systemVarKey, l.ReadOptions)
+func (l *levelDB) GetClusterInfo() (*comm.ClusterInfo, error) {
+	value, err := l.DB.Get(clusterInfoKey, l.ReadOptions)
 	if err == leveldb.ErrNotFound {
 		return nil, ErrNotFound
 	}
 	if err != nil {
-		return nil, fmt.Errorf("leveldb: get value error: %v", err)
+		return nil, fmt.Errorf("leveldb: get value: %v", err)
 	}
-	v := &comm.SystemVar{}
+	v := &comm.ClusterInfo{}
 	if err := proto.Unmarshal(value, v); err != nil {
-		return nil, fmt.Errorf("leveldb: unmarshal system var error: %v", err)
+		return nil, fmt.Errorf("leveldb: unmarshal cluster info: %v", err)
 	}
 	return v, nil
 }
 
-func (l *levelDB) SetMasterVar(v *comm.MasterVar) error {
+func (l *levelDB) SetLeaderInfo(v *comm.LeaderInfo) error {
 	value, err := proto.Marshal(v)
 	if err != nil {
-		return fmt.Errorf("leveldb: marshal master var error: %v", err)
+		return fmt.Errorf("leveldb: marshal leader info: %v", err)
 	}
-	if err = l.DB.Put(masterVarKey, value, l.WriteOptions); err != nil {
-		return fmt.Errorf("leveldb: set value error: %v", err)
+	if err = l.DB.Put(leaderInfoKey, value, l.WriteOptions); err != nil {
+		return fmt.Errorf("leveldb: set value: %v", err)
 	}
 	return nil
 }
 
-func (l *levelDB) GetMasterVar() (*comm.MasterVar, error) {
-	value, err := l.DB.Get(masterVarKey, l.ReadOptions)
+func (l *levelDB) GetLeaderInfo() (*comm.LeaderInfo, error) {
+	value, err := l.DB.Get(leaderInfoKey, l.ReadOptions)
 	if err == leveldb.ErrNotFound {
 		return nil, ErrNotFound
 	}
 	if err != nil {
-		return nil, fmt.Errorf("leveldb: get value error: %v", err)
+		return nil, fmt.Errorf("leveldb: get value: %v", err)
 	}
-	v := &comm.MasterVar{}
+	v := &comm.LeaderInfo{}
 	if err := proto.Unmarshal(value, v); err != nil {
-		return nil, fmt.Errorf("leveldb: unmarshal master var error: %v", err)
+		return nil, fmt.Errorf("leveldb: unmarshal leader info: %v", err)
 	}
 	return v, nil
 }
@@ -386,9 +389,9 @@ func (l *levelDB) GetMaxInstanceIDFileID() (instanceID uint64, value []byte, err
 	}
 
 	var key []byte
-	key, err = comm.ObjectToBytes(instanceID)
+	key, err = util.ObjectToBytes(instanceID)
 	if err != nil {
-		err = fmt.Errorf("leveldb: convert %d to bytes error: %v", instanceID, err)
+		err = fmt.Errorf("leveldb: convert %d to bytes: %v", instanceID, err)
 		return
 	}
 	value, err = l.DB.Get(key, l.ReadOptions)
@@ -397,14 +400,14 @@ func (l *levelDB) GetMaxInstanceIDFileID() (instanceID uint64, value []byte, err
 		return
 	}
 	if err != nil {
-		err = fmt.Errorf("leveldb: get value error: %v", err)
+		err = fmt.Errorf("leveldb: get value: %v", err)
 	}
 
 	return
 }
 
 func (l *levelDB) RebuildOneIndex(instanceID uint64, value []byte) error {
-	key, err := comm.ObjectToBytes(instanceID)
+	key, err := util.ObjectToBytes(instanceID)
 	if err != nil {
 		return err
 	}
