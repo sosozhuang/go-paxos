@@ -1,3 +1,16 @@
+// Copyright © 2017 sosozhuang <sosozhuang@163.com>
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
 package node
 
 import (
@@ -8,9 +21,10 @@ import (
 	"github.com/sosozhuang/paxos/comm"
 	"github.com/sosozhuang/paxos/network"
 	"github.com/sosozhuang/paxos/paxos"
-	"github.com/sosozhuang/paxos/store"
-	"hash/crc32"
-	"math/rand"
+	"github.com/sosozhuang/paxos/storage"
+	"github.com/sosozhuang/paxos/util"
+	"strconv"
+	"strings"
 	"sync"
 	"time"
 )
@@ -21,42 +35,26 @@ const (
 	followTimeout  = time.Second * 10
 )
 
-var crcTable = crc32.MakeTable(crc32.Castagnoli)
-
 type groupConfig struct {
-	nodeID  uint64
-	groupID uint16
-	//members          map[uint64]string
+	nodeID           uint64
+	groupID          uint16
 	followerMode     bool
 	followNodeID     uint64
 	forceNewMembers  bool
-	enableMemberShip bool
 	enableReplayer   bool
 	sms              []comm.StateMachine
-	masterSM         comm.StateMachine
-	systemSM         *systemStateMachine
+	leaderSM         comm.StateMachine
+	clusterSM        *clusterStateMachine
 	lmu              sync.Mutex
 	learnNodes       map[uint64]time.Time
 	fmu              sync.Mutex
 	followers        map[uint64]time.Time
 }
 
-func (cfg *groupConfig) validate(st store.Storage) error {
-	var err error
-	cfg.systemSM, err = newSystemStateMachine(cfg.nodeID, cfg.forceNewMembers, st)
-	if err != nil {
-		return err
-	}
-	//if cfg.GetClusterID() == 0 && len(cfg.members) <= 0 {
-	//	return errors.New("group: members are empty")
-	//}
-
-	//cfg.systemSM.setMembers(cfg.members)
-
+func (cfg *groupConfig) init() {
 	cfg.sms = make([]comm.StateMachine, 0)
 	cfg.learnNodes = make(map[uint64]time.Time)
 	cfg.followers = make(map[uint64]time.Time)
-	return nil
 }
 
 func (cfg *groupConfig) FollowerMode() bool {
@@ -76,43 +74,39 @@ func (cfg *groupConfig) GetGroupID() uint16 {
 }
 
 func (cfg *groupConfig) GetClusterID() uint64 {
-	return cfg.systemSM.getClusterID()
+	return cfg.clusterSM.getClusterID()
 }
 
 func (cfg *groupConfig) isClusterInitialized() bool {
-	return cfg.systemSM.isInitialized()
+	return cfg.clusterSM.isInitialized()
 }
 
 func (cfg *groupConfig) GetMajorityCount() int {
-	return cfg.systemSM.getMajorityCount()
+	return cfg.clusterSM.getMajorityCount()
 }
 
 func (cfg *groupConfig) isValidNodeID(nodeID uint64) bool {
-	return cfg.systemSM.isValidNodeID(nodeID)
+	return cfg.clusterSM.isValidNodeID(nodeID)
 }
 
 func (cfg *groupConfig) GetMemberCount() int {
-	return cfg.systemSM.getMemberCount()
+	return cfg.clusterSM.getMemberCount()
 }
 
-func (cfg *groupConfig) getMembersWithVersion() (map[uint64]string, uint64) {
-	return cfg.systemSM.getMembersWithVersion()
+func (cfg *groupConfig) getMembersWithVersion() (map[uint64]comm.Member, uint64) {
+	return cfg.clusterSM.getMembersWithVersion()
 }
 
-func (cfg *groupConfig) isInMemberShip() bool {
-	return cfg.systemSM.isInMemberShip()
+func (cfg *groupConfig) isInMembership() bool {
+	return cfg.clusterSM.isInMembership()
 }
 
 func (cfg *groupConfig) IsEnableReplayer() bool {
 	return cfg.enableReplayer
 }
 
-func (cfg *groupConfig) isEnableMemberShip() bool {
-	return cfg.enableMemberShip
-}
-
 func (cfg *groupConfig) addLearnNode(id uint64) {
-	if _, ok := cfg.systemSM.getMembers()[id]; ok {
+	if _, ok := cfg.clusterSM.getMembers()[id]; ok {
 		cfg.lmu.Lock()
 		cfg.learnNodes[id] = time.Now().Add(learnTimeout)
 		cfg.lmu.Unlock()
@@ -155,29 +149,45 @@ func (cfg *groupConfig) GetFollowers() map[uint64]string {
 	return m
 }
 
-func (cfg *groupConfig) setMembers(members map[uint64]string) {
-	cfg.systemSM.setMembers(members)
+func (cfg *groupConfig) setMembers(members map[uint64]comm.Member) {
+	cfg.clusterSM.setMembers(members)
 }
 
-func (cfg *groupConfig) GetMembers() map[uint64]string {
-	return cfg.systemSM.getMembers()
+func (cfg *groupConfig) GetMembers() map[uint64]comm.Member {
+	return cfg.clusterSM.getMembers()
 }
 
-func (cfg *groupConfig) GetSystemCheckpoint() ([]byte, error) {
-	return cfg.systemSM.GetCheckpoint()
+func (cfg *groupConfig) GetClusterCheckpoint() ([]byte, error) {
+	return cfg.clusterSM.GetCheckpoint()
 }
 
-func (cfg *groupConfig) UpdateSystemByCheckpoint(b []byte) error {
-	return cfg.systemSM.UpdateByCheckpoint(b)
+func (cfg *groupConfig) UpdateClusterByCheckpoint(b []byte) error {
+	return cfg.clusterSM.UpdateByCheckpoint(b)
 }
 
-func (cfg *groupConfig) GetMasterCheckpoint() ([]byte, error) {
-	return cfg.masterSM.GetCheckpoint()
+func (cfg *groupConfig) GetLeaderCheckpoint() ([]byte, error) {
+	return cfg.leaderSM.GetCheckpoint()
 }
 
-func (cfg *groupConfig) UpdateMasterByCheckpoint(b []byte) error {
-	return cfg.masterSM.UpdateByCheckpoint(b)
+func (cfg *groupConfig) UpdateLeaderByCheckpoint(b []byte) error {
+	return cfg.leaderSM.UpdateByCheckpoint(b)
 }
+
+var (
+	errExceededLimit         = errors.New("group: proposal value length exceeded limit")
+	errInFollowerMode        = errors.New("group: follower mode can't accept proposal")
+	errNotInMemberShip       = errors.New("group: not in membership")
+	errChanFull              = errors.New("group: proposal channel full")
+	errClusterIDNotMatched   = errors.New("group: message cluster id not matched")
+	errChecksumNotMatched    = errors.New("group: message checksum not matched")
+	//ErrClusterUninitialized  = errors.New("group: cluster uninitialized")
+	//ErrMemberExists          = errors.New("group: member already exists")
+	//ErrMemberNotExists       = errors.New("group: member not exists")
+	//ErrMemberNotModified     = errors.New("group: member not modified")
+	//ErrMemberNameEmpty       = errors.New("group: empty member name")
+	//ErrMemberAddrEmpty       = errors.New("group: empty member address")
+	//ErrMemberServiceUrlEmpty = errors.New("group: empty member service url")
+)
 
 type group struct {
 	cfg       *groupConfig
@@ -187,18 +197,15 @@ type group struct {
 	wg        sync.WaitGroup
 }
 
-func newGroup(cfg groupConfig, sender comm.Sender, st store.Storage) (comm.Group, error) {
-	var err error
-	if err = cfg.validate(st); err != nil {
-		return nil, err
-	}
-
+func newGroup(cfg groupConfig, sender comm.Sender, st storage.Storage) (comm.Group, error) {
+	cfg.init()
 	group := &group{
 		cfg:       &cfg,
 		proposeCh: make(chan context.Context, 100),
 		msgCh:     make(chan []byte, 100),
 	}
 
+	var err error
 	group.instance, err = paxos.NewInstance(group.cfg, sender, st)
 	if err != nil {
 		return nil, err
@@ -212,10 +219,10 @@ func (g *group) Start(ctx context.Context, stopped <-chan struct{}) error {
 	case <-ctx.Done():
 		return ctx.Err()
 	default:
-		if g.cfg.masterSM != nil {
-			g.addStateMachine(g.cfg.masterSM)
+		if g.cfg.leaderSM != nil {
+			g.addStateMachine(g.cfg.leaderSM)
 		}
-		g.addStateMachine(g.cfg.systemSM)
+		g.addStateMachine(g.cfg.clusterSM)
 		g.addStateMachine(g.cfg.sms...)
 		go g.handleNewValue(stopped)
 		go g.handleMessage(stopped)
@@ -237,16 +244,16 @@ func (g *group) Stop() {
 
 func (g *group) Propose(ctx context.Context, smid uint32, value []byte) (<-chan comm.Result, error) {
 	if len(value) >= maxValueLength {
-		return nil, errors.New("group: proposal value length exceeded limit")
+		return nil, errExceededLimit
 	}
 	if g.cfg.FollowerMode() {
-		return nil, errors.New("group: follower mode can't accept proposal")
+		return nil, errInFollowerMode
 	}
-	if !g.cfg.isInMemberShip() {
-		return nil, errors.New("group: not in membership")
+	if !g.cfg.isInMembership() {
+		return nil, errNotInMemberShip
 	}
 
-	b, err := comm.ObjectToBytes(smid)
+	b, err := util.ObjectToBytes(smid)
 	if err != nil {
 		return nil, err
 	}
@@ -264,7 +271,7 @@ func (g *group) Propose(ctx context.Context, smid uint32, value []byte) (<-chan 
 			continue
 		}
 	}
-	return nil, errors.New("proposal channel full")
+	return nil, errChanFull
 }
 
 func (g *group) BatchPropose(context.Context, uint32, []byte, uint32) (<-chan comm.Result, error) {
@@ -275,7 +282,7 @@ func (g *group) handleNewValue(stopped <-chan struct{}) {
 	g.wg.Add(1)
 	defer func() {
 		g.wg.Done()
-		log.Debugf("Group %d handleNewValue stopped.", g.cfg.GetGroupID())
+		log.Debugf("Group %d handle new value stopped.", g.cfg.GetGroupID())
 	}()
 	for {
 		select {
@@ -295,42 +302,41 @@ func (g *group) handleNewValue(stopped <-chan struct{}) {
 		if d, ok := ctx.Deadline(); ok && d.Before(time.Now()) {
 			continue
 		}
-		if g.cfg.isEnableMemberShip() &&
-			(g.instance.GetProposerInstanceID() == 0 || !g.cfg.isClusterInitialized()) {
-			g.newSystemValue()
+		if g.instance.GetProposerInstanceID() == 0 ||
+			!g.cfg.isClusterInitialized() {
+			g.initCluster()
 		}
 		g.instance.NewValue(ctx)
 
 	}
 }
 
-func (g *group) newSystemValue() {
+func (g *group) initCluster() {
 	members, version := g.cfg.getMembersWithVersion()
-	svar := &comm.SystemVar{
-		ClusterID: proto.Uint64(g.cfg.GetNodeID() ^ uint64(rand.Uint32()) + uint64(rand.Uint32())),
+	svar := &comm.ClusterInfo{
+		ClusterID: proto.Uint64(g.cfg.clusterSM.newClusterID()),
 		Version:   proto.Uint64(version),
 	}
-	//if g.cfg.forceNewMembers {
-	//	svar.ClusterID = proto.Uint64(g.cfg.GetClusterID())
-	//} else {
-	//	svar.ClusterID = proto.Uint64(g.cfg.GetNodeID() ^ uint64(rand.Uint32()))
-	//}
-	svar.Nodes = make([]*comm.PaxosNodeInfo, g.cfg.GetMemberCount())
+	svar.Members = make([]*comm.Member, len(members))
 	i := 0
-	for k, v := range members {
-		svar.Nodes[i] = &comm.PaxosNodeInfo{NodeID: proto.Uint64(uint64(k)), Addr: proto.String(v)}
+	for _, member := range members {
+		svar.Members[i] = &comm.Member{
+			NodeID: proto.Uint64(member.GetNodeID()),
+			Name:   proto.String(member.GetName()),
+			Addr:   proto.String(member.GetAddr()),
+		}
 		i++
 	}
 
 	value, err := proto.Marshal(svar)
 	if err != nil {
-		log.Errorf("Group %d marshal system var error: %v.", g.cfg.GetGroupID(), err)
+		log.Errorf("Group %d marshal cluster info error: %v.", g.cfg.GetGroupID(), err)
 		return
 	}
 
-	b, err := comm.ObjectToBytes(comm.SystemStateMachineID)
+	b, err := util.ObjectToBytes(comm.ClusterStateMachineID)
 	if err != nil {
-		log.Errorf("Group %d convert system smid to bytes error: %v.", g.cfg.GetGroupID(), err)
+		log.Errorf("Group %d convert cluster smid to bytes error: %v.", g.cfg.GetGroupID(), err)
 		return
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), maxProposeTimeout)
@@ -342,12 +348,12 @@ func (g *group) newSystemValue() {
 	go g.instance.NewValue(ctx)
 	select {
 	case <-ctx.Done():
-		log.Errorf("Group %d propose new system var error: %v.", g.cfg.GetGroupID(), ctx.Err())
+		log.Errorf("Group %d propose new cluster info error: %v.", g.cfg.GetGroupID(), ctx.Err())
 	case x := <-result:
 		if x.Err != nil {
-			log.Errorf("Group %d propose new system var error: %v.", g.cfg.GetGroupID(), x.Err)
+			log.Errorf("Group %d propose new cluster info error: %v.", g.cfg.GetGroupID(), x.Err)
 		} else {
-			log.Infof("Group %d propose new system var result: %v.", g.cfg.GetGroupID(), x)
+			log.Infof("Group %d propose new cluster info result: %v.", g.cfg.GetGroupID(), x)
 		}
 	}
 }
@@ -368,7 +374,7 @@ func (g *group) handleMessage(stopped <-chan struct{}) {
 	g.wg.Add(1)
 	defer func() {
 		g.wg.Done()
-		log.Debugf("Group %d handleMessage stopped.", g.cfg.GetGroupID())
+		log.Debugf("Group %d handle message stopped.", g.cfg.GetGroupID())
 	}()
 	for b := range g.msgCh {
 		select {
@@ -408,7 +414,7 @@ func (g *group) unpack(b []byte) (*comm.Header, []byte, error) {
 	//skip group id
 	start := comm.GroupIDLen
 	offset := start + comm.Int32Len
-	headerLen, err := comm.BytesToInt(b[start:offset])
+	headerLen, err := util.BytesToInt(b[start:offset])
 	if err != nil {
 		return nil, nil, fmt.Errorf("convert bytes to header length: %v", err)
 	}
@@ -421,12 +427,12 @@ func (g *group) unpack(b []byte) (*comm.Header, []byte, error) {
 	}
 
 	if !g.checkClusterID(header.GetClusterID()) {
-		return nil, nil, errors.New("cluster id error")
+		return nil, nil, errClusterIDNotMatched
 	}
 
 	start = offset
 	offset = start + comm.Int32Len
-	msgLen, err := comm.BytesToInt(b[start:offset])
+	msgLen, err := util.BytesToInt(b[start:offset])
 	if err != nil {
 		return nil, nil, fmt.Errorf("convert bytes to message length: %v", err)
 	}
@@ -435,12 +441,12 @@ func (g *group) unpack(b []byte) (*comm.Header, []byte, error) {
 	offset = start + msgLen
 
 	var checksum uint32
-	if err = comm.BytesToObject(b[offset:], &checksum); err != nil {
+	if err = util.BytesToObject(b[offset:], &checksum); err != nil {
 		return nil, b[start:offset], fmt.Errorf("convert bytes to checksum: %v", err)
 	}
 
-	if checksum != crc32.Checksum(b[:offset], crcTable) {
-		return nil, b[start:offset], errors.New("verify message checksum error")
+	if checksum != util.Checksum(b[:offset]) {
+		return nil, b[start:offset], errChecksumNotMatched
 	}
 	return header, b[start:offset], nil
 }
@@ -509,54 +515,87 @@ func (g *group) SetMaxLogCount(c int64) {
 	g.instance.SetMaxLogCount(c)
 }
 
-func (g *group) SetMembers(members map[uint64]string) {
+func (g *group) GetMembers() (map[uint64]comm.Member, error) {
+	if !g.cfg.isClusterInitialized() {
+		return nil, comm.ErrClusterUninitialized
+	}
+	return g.cfg.GetMembers(), nil
+}
+
+func (g *group) SetMembers(members map[uint64]comm.Member) {
 	g.cfg.setMembers(members)
 }
 
-func (g *group) AddMember(ctx context.Context, nodeID uint64, addr string) (<-chan comm.Result, error) {
+func checkMember(member *comm.Member) error {
+	if member.GetName() == "" {
+		return comm.ErrMemberNameEmpty
+	}
+	if member.GetAddr() == "" {
+		return comm.ErrMemberAddrEmpty
+	}
+	addr := strings.SplitN(member.GetAddr(), ":", 2)
+	if len(addr) != 2 {
+		return fmt.Errorf("invalid member address: %s", member.GetAddr())
+	}
+	port, err := strconv.Atoi(addr[1])
+	if err != nil {
+		return fmt.Errorf("parse member address %s: %v", member.GetAddr(), err)
+	}
+	id, err := network.AddrToUint64(addr[0], port)
+	if err != nil {
+		return err
+	}
+	member.NodeID = proto.Uint64(id)
+	return nil
+}
+
+func (g *group) AddMember(ctx context.Context, member comm.Member) (<-chan comm.Result, error) {
 	if !g.cfg.isClusterInitialized() {
-		return nil, errors.New("group: membership uninitialized")
+		return nil, comm.ErrClusterUninitialized
+	}
+	if err := checkMember(&member); err != nil {
+		return nil, err
 	}
 	members, version := g.cfg.getMembersWithVersion()
-	if _, ok := members[nodeID]; ok {
-		return nil, errors.New("group: member exist")
+	if _, ok := members[member.GetNodeID()]; ok {
+		return nil, comm.ErrMemberExists
 	}
-	svar := &comm.SystemVar{
+	svar := &comm.ClusterInfo{
 		ClusterID: proto.Uint64(g.cfg.GetClusterID()),
 		Version:   proto.Uint64(version),
 	}
-	svar.Nodes = make([]*comm.PaxosNodeInfo, g.cfg.GetMemberCount()+1)
+	svar.Members = make([]*comm.Member, len(members)+1)
 	i := 0
-	for k, v := range members {
-		svar.Nodes[i] = &comm.PaxosNodeInfo{NodeID: proto.Uint64(uint64(k)), Addr: proto.String(v)}
+	for _, m := range members {
+		svar.Members[i] = &m
 		i++
 	}
-	svar.Nodes[i] = &comm.PaxosNodeInfo{NodeID: proto.Uint64(uint64(nodeID)), Addr: proto.String(addr)}
+	svar.Members[i] = &member
 	value, err := proto.Marshal(svar)
 	if err != nil {
 		return nil, err
 	}
 
-	return g.Propose(ctx, comm.SystemStateMachineID, value)
+	return g.Propose(ctx, comm.ClusterStateMachineID, value)
 }
 
-func (g *group) RemoveMember(ctx context.Context, nodeID uint64) (<-chan comm.Result, error) {
+func (g *group) RemoveMember(ctx context.Context, member comm.Member) (<-chan comm.Result, error) {
 	if !g.cfg.isClusterInitialized() {
-		return nil, errors.New("group: membership uninitialized")
+		return nil, comm.ErrClusterUninitialized
 	}
 	members, version := g.cfg.getMembersWithVersion()
-	if _, ok := members[nodeID]; !ok {
-		return nil, errors.New("group: member not exist")
+	if _, ok := members[member.GetNodeID()]; !ok {
+		return nil, comm.ErrMemberNotExists
 	}
-	svar := &comm.SystemVar{
+	svar := &comm.ClusterInfo{
 		ClusterID: proto.Uint64(g.cfg.GetClusterID()),
 		Version:   proto.Uint64(version),
 	}
-	svar.Nodes = make([]*comm.PaxosNodeInfo, g.cfg.GetMemberCount()-1)
+	svar.Members = make([]*comm.Member, len(members)-1)
 	i := 0
-	for k, v := range members {
-		if k != nodeID {
-			svar.Nodes[i] = &comm.PaxosNodeInfo{NodeID: proto.Uint64(uint64(k)), Addr: proto.String(v)}
+	for id, m := range members {
+		if id != member.GetNodeID() {
+			svar.Members[i] = &m
 			i++
 		}
 	}
@@ -565,31 +604,38 @@ func (g *group) RemoveMember(ctx context.Context, nodeID uint64) (<-chan comm.Re
 		return nil, err
 	}
 
-	return g.Propose(ctx, comm.SystemStateMachineID, value)
+	return g.Propose(ctx, comm.ClusterStateMachineID, value)
 }
 
-func (g *group) ChangeMember(ctx context.Context, dst uint64, addr string, src uint64) (<-chan comm.Result, error) {
+func (g *group) UpdateMember(ctx context.Context, dst, src comm.Member) (<-chan comm.Result, error) {
 	if !g.cfg.isClusterInitialized() {
-		return nil, errors.New("group: membership uninitialized")
+		return nil, comm.ErrClusterUninitialized
+	}
+	if err := checkMember(&dst); err != nil {
+		return nil, err
 	}
 	members, version := g.cfg.getMembersWithVersion()
-	if _, ok := members[dst]; ok {
-		return nil, errors.New("group: member exist")
+	if _, ok := members[dst.GetNodeID()]; ok {
+		return nil, comm.ErrMemberExists
 	}
-	if _, ok := members[src]; !ok {
-		return nil, errors.New("group: member not exist")
+	if m, ok := members[src.GetNodeID()]; !ok {
+		return nil, comm.ErrMemberNotExists
+	} else if m.GetName() == dst.GetName() &&
+		m.GetAddr() == dst.GetAddr() {
+		return nil, comm.ErrMemberNotModified
 	}
-	svar := &comm.SystemVar{
+
+	svar := &comm.ClusterInfo{
 		ClusterID: proto.Uint64(g.cfg.GetClusterID()),
 		Version:   proto.Uint64(version),
 	}
-	svar.Nodes = make([]*comm.PaxosNodeInfo, g.cfg.GetMemberCount())
+	svar.Members = make([]*comm.Member, len(members))
 	i := 0
-	for k, v := range members {
-		if k != src {
-			svar.Nodes[i] = &comm.PaxosNodeInfo{NodeID: proto.Uint64(uint64(k)), Addr: proto.String(v)}
+	for id, member := range members {
+		if id != src.GetNodeID() {
+			svar.Members[i] = &member
 		} else {
-			svar.Nodes[i] = &comm.PaxosNodeInfo{NodeID: proto.Uint64(uint64(dst)), Addr: proto.String(addr)}
+			svar.Members[i] = &dst
 		}
 		i++
 	}
@@ -598,9 +644,9 @@ func (g *group) ChangeMember(ctx context.Context, dst uint64, addr string, src u
 		return nil, err
 	}
 
-	return g.Propose(ctx, comm.SystemStateMachineID, value)
+	return g.Propose(ctx, comm.ClusterStateMachineID, value)
 }
 
-func (g *group) GetNodeCount() int {
+func (g *group) GetMemberCount() int {
 	return g.cfg.GetMemberCount()
 }

@@ -17,12 +17,16 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"github.com/gogo/protobuf/proto"
 	"github.com/sosozhuang/paxos/comm"
 	"github.com/sosozhuang/paxos/election"
+	"github.com/sosozhuang/paxos/http"
 	"github.com/sosozhuang/paxos/logger"
 	"github.com/sosozhuang/paxos/network"
-	"github.com/sosozhuang/paxos/store"
+	"github.com/sosozhuang/paxos/storage"
+	"github.com/sosozhuang/paxos/util"
 	"math"
+	"path"
 	"strconv"
 	"strings"
 	"time"
@@ -33,57 +37,63 @@ const (
 )
 
 var (
-	log              = logger.GetLogger("node")
+	log               = logger.GetLogger("node")
 	minProposeTimeout = time.Second
 	maxProposeTimeout = time.Second * 10
-	errGroupOutRange = errors.New("group out of range")
-	errNodeStopping  = errors.New("node is stopping")
+	errGroupOutRange  = errors.New("group out of range")
+	errNotLeader      = errors.New("not leader")
+	errNodeStopping   = errors.New("node is stopping")
+	errNodeNotReady   = errors.New("node not ready")
 )
 
 type NodeConfig struct {
-	name             string
-	groupCount       int
-	members          string
-	enableElection   bool
-	enableMemberShip bool
-	followerMode     bool
-	followNode       string
-	proposeTimeout   time.Duration
+	name           string
+	groupCount     int
+	members        string
+	followerMode   bool
+	followNode     string
+	proposeTimeout time.Duration
 
-	advertiseIP      string
-	listenIP         string
-	listenPort       int
+	advertiseIP    string
+	listenPeerIP   string
+	listenPeerPort int
 
-	id           uint64
-	listenAddr   string
-	followNodeID uint64
-	membersMap map[uint64]string
+	id             uint64
+	listenPeerAddr string
+	followNodeID   uint64
+	membersMap     map[uint64]comm.Member
 }
 
 func (cfg *NodeConfig) validate() error {
+	if cfg.name == "" {
+		return errors.New("empty name")
+	}
 	if cfg.groupCount <= 0 {
-		return errors.New("group count should greater than 0")
+		return fmt.Errorf("invalid group count: %d", cfg.groupCount)
 	}
 	if cfg.groupCount > maxGroupCount {
 		return fmt.Errorf("group count %d exceeded limit", cfg.groupCount)
 	}
+	if cfg.members == "" {
+		return errors.New("empty members")
+	}
 	if cfg.followerMode && cfg.followNode == "" {
-		return errors.New("node in follower mode but not follow a node")
+		return errors.New("in follower mode but not follow a node")
 	}
-	if cfg.listenIP == "" {
-		return errors.New("listen ip is empty")
+	if cfg.listenPeerIP == "" {
+		return errors.New("empty listen peer ip")
 	}
-	if cfg.listenPort <= 0 {
-		return fmt.Errorf("listen port %d invalid", cfg.listenPort)
+	if cfg.listenPeerPort <= 0 {
+		return fmt.Errorf("invalid listen peer port: %d", cfg.listenPeerPort)
 	}
 
 	var ip string
 	if cfg.advertiseIP != "" {
 		ip = cfg.advertiseIP
 	} else {
-		ip = cfg.listenIP
+		ip = cfg.listenPeerIP
 	}
-	id, err := network.AddrToUint64(ip, cfg.listenPort)
+	id, err := network.AddrToUint64(ip, cfg.listenPeerPort)
 	if err != nil {
 		return err
 	}
@@ -92,7 +102,7 @@ func (cfg *NodeConfig) validate() error {
 	if cfg.followerMode {
 		addr := strings.SplitN(cfg.followNode, ":", 2)
 		if len(addr) != 2 {
-			return fmt.Errorf("follow node address %s unrecognize", cfg.followNode)
+			return fmt.Errorf("invalid follow node address: %s", cfg.followNode)
 		}
 		port, err := strconv.Atoi(addr[1])
 		if err != nil {
@@ -108,23 +118,37 @@ func (cfg *NodeConfig) validate() error {
 		}
 	}
 
-	cfg.listenAddr = fmt.Sprintf("%s:%d", cfg.listenIP, cfg.listenPort)
+	cfg.listenPeerAddr = fmt.Sprintf("%s:%d", cfg.listenPeerIP, cfg.listenPeerPort)
 	members := strings.Split(cfg.members, ",")
-	cfg.membersMap = make(map[uint64]string, len(members))
+	cfg.membersMap = make(map[uint64]comm.Member, len(members))
 	for _, member := range members {
-		addr := strings.SplitN(member, ":", 2)
+		s := strings.SplitN(member, ":", 2)
+		if len(s) != 2 {
+			return fmt.Errorf("member %s unrecognize", member)
+		}
+		if s[0] == "" {
+			return fmt.Errorf("member %s name is empty", member)
+		}
+		addr := strings.SplitN(s[1], ":", 2)
 		if len(addr) != 2 {
-			return fmt.Errorf("member address %s unrecognize", addr)
+			return fmt.Errorf("member %s unrecognize", member)
 		}
 		port, err := strconv.Atoi(addr[1])
 		if err != nil {
-			return fmt.Errorf("parse member address %s: %v", addr, err)
+			return fmt.Errorf("parse member address %s: %v", s[1], err)
 		}
 		id, err = network.AddrToUint64(addr[0], port)
 		if err != nil {
 			return err
 		}
-		cfg.membersMap[id] = member
+		if _, ok := cfg.membersMap[id]; ok {
+			return fmt.Errorf("member address %s duplicated", member)
+		}
+		cfg.membersMap[id] = comm.Member{
+			NodeID: proto.Uint64(id),
+			Name:   proto.String(s[0]),
+			Addr:   proto.String(s[1]),
+		}
 	}
 	if _, ok := cfg.membersMap[cfg.id]; !ok {
 		return errors.New("listen addr not in members")
@@ -142,35 +166,33 @@ func (cfg *NodeConfig) validate() error {
 }
 
 type node struct {
-	cfg *NodeConfig
-	//ready   chan struct{}
+	cfg      *NodeConfig
 	done     chan struct{}
 	stopped  chan struct{}
 	errChan  chan error
+	ready    bool
 	stopping bool
-	//wg      sync.WaitGroup
-	storage store.MultiGroupStorage
-	network comm.NetWork
-	masters []election.Master
-	groups  []comm.Group
-	//batches []Batch
-	sms [][]comm.StateMachine
+	storage  storage.MultiGroupStorage
+	network  comm.NetWork
+	httpSvc  http.HttpService
+	leader   election.Leadership
+	groups   []comm.Group
+	sms      [][]comm.StateMachine
+	kvstore  storage.KeyValueStore
 }
 
 func NewNode(cfg *comm.Config) (n *node, err error) {
 	log.Debugf("Using config:\n%v.", cfg)
 	nodeCfg := &NodeConfig{
-		name:             cfg.Name,
-		groupCount:       cfg.GroupCount,
-		members:          cfg.Members,
-		enableElection:   cfg.EnableElection,
-		enableMemberShip: cfg.EnableMemberShip,
-		followerMode:     cfg.FollowerMode,
-		followNode:       cfg.FollowNode,
-		proposeTimeout:   cfg.ProposeTimeout,
-		advertiseIP:      cfg.AdvertiseIP,
-		listenIP:         cfg.ListenIP,
-		listenPort:       cfg.ListenPort,
+		name:           cfg.Name,
+		groupCount:     cfg.GroupCount,
+		members:        cfg.Members,
+		followerMode:   cfg.FollowerMode,
+		followNode:     cfg.FollowNode,
+		proposeTimeout: cfg.ProposeTimeout,
+		advertiseIP:    cfg.AdvertiseIP,
+		listenPeerIP:   cfg.ListenPeerIP,
+		listenPeerPort: cfg.ListenPeerPort,
 	}
 	if err = nodeCfg.validate(); err != nil {
 		return
@@ -181,23 +203,16 @@ func NewNode(cfg *comm.Config) (n *node, err error) {
 		//ready:   make(chan struct{}),
 		done:    make(chan struct{}),
 		stopped: make(chan struct{}),
-		// todo: error chan size gt network,group, master...
-		errChan: make(chan error, 10),
+		//error channel size is storage add group count of group and leader
+		errChan: make(chan error, 1+cfg.GroupCount*(1+1)),
 	}
 
-	defer func() {
-		if err != nil && n != nil {
-			n.stop()
-			n = nil
-		}
-	}()
-
-	var t store.StorageType
-	t, err = store.ParseStorageType(cfg.StorageType)
+	var t storage.StorageType
+	t, err = storage.ParseStorageType(cfg.StorageType)
 	if err != nil {
 		return
 	}
-	storageCfg := store.StorageConfig{
+	storageCfg := storage.StorageConfig{
 		GroupCount: cfg.GroupCount,
 		DataDir:    cfg.DataDir,
 		Type:       t,
@@ -206,7 +221,7 @@ func NewNode(cfg *comm.Config) (n *node, err error) {
 		SyncCount:  cfg.SyncCount,
 		DisableWAL: cfg.DisableWAL,
 	}
-	n.storage, err = store.NewDiskStorage(storageCfg)
+	n.storage, err = storage.NewDiskStorage(storageCfg)
 	if err != nil {
 		log.Errorf("Node create storage error: %v.", err)
 		return
@@ -215,7 +230,7 @@ func NewNode(cfg *comm.Config) (n *node, err error) {
 	networkCfg := network.NetWorkConfig{
 		NetWork:       cfg.ListenMode,
 		Token:         cfg.Token,
-		ListenAddr:    n.cfg.listenAddr,
+		ListenAddr:    n.cfg.listenPeerAddr,
 		ListenTimeout: cfg.ListenTimeout,
 		ReadTimeout:   cfg.ReadTimeout,
 		ServerChanCap: cfg.ServerChanCap,
@@ -230,42 +245,63 @@ func NewNode(cfg *comm.Config) (n *node, err error) {
 		return
 	}
 
-	if n.cfg.enableElection {
-		n.masters = make([]election.Master, n.cfg.groupCount)
-		for i := uint16(0); i < uint16(n.cfg.groupCount); i++ {
-			masterCfg := election.MasterConfig{
-				NodeID:          n.cfg.id,
-				GroupID:         i,
-				ElectionTimeout: cfg.ElectionTimeout,
-			}
-			if n.masters[i], err = election.NewMaster(masterCfg, n, n.storage.GetStorage(i)); err != nil {
-				log.Errorf("Node create master[%d] error: %v.", i, err)
-				return nil, err
-			}
+	if n.kvstore, err = storage.NewKeyValueStore(n, path.Join(cfg.DataDir, "kvstore")); err != nil {
+		return
+	}
+
+	httpSvcCfg := http.HttpServiceConfig{
+		ServiceUrl: cfg.ServiceUrl,
+	}
+	n.httpSvc, err = http.NewHttpService(httpSvcCfg, n, n.kvstore)
+	if err != nil {
+		log.Errorf("Node %d create http service error: %v.", n.cfg.id, err)
+		return
+	}
+
+	if !n.cfg.followerMode {
+		leaderCfg := election.LeaderConfig{
+			NodeID:          n.cfg.id,
+			Name:            n.cfg.name,
+			Addr:            n.cfg.listenPeerAddr,
+			ServiceUrl:      cfg.ServiceUrl,
+			GroupID:         0,
+			ElectionTimeout: cfg.ElectionTimeout,
 		}
+		if n.leader, err = election.NewLeadership(leaderCfg, n, n.storage.GetStorage(0)); err != nil {
+			log.Errorf("Node %d create leader error: %v.", n.cfg.id, err)
+			return
+		}
+	}
+
+	var cluster *clusterStateMachine
+	cluster, err = newClusterStateMachine(n.cfg.id, cfg.ForceNewMembers, n.storage.GetStorage(0))
+	if err != nil {
+		log.Errorf("Node %d create cluster error: %v.", n.cfg.id, err)
+		return nil, err
 	}
 
 	n.groups = make([]comm.Group, n.cfg.groupCount)
 	for i := uint16(0); i < uint16(n.cfg.groupCount); i++ {
 		groupCfg := groupConfig{
-			nodeID:  n.cfg.id,
-			groupID: i,
-			//members: n.cfg.membersMap,
-			followerMode:     n.cfg.followerMode,
-			followNodeID:     n.cfg.followNodeID,
-			forceNewMembers:  cfg.ForceNewMembers,
-			enableMemberShip: n.cfg.enableMemberShip,
+			nodeID:          n.cfg.id,
+			groupID:         i,
+			followerMode:    n.cfg.followerMode,
+			followNodeID:    n.cfg.followNodeID,
+			forceNewMembers: cfg.ForceNewMembers,
+			clusterSM:       cluster,
 		}
-		if n.cfg.enableElection {
-			groupCfg.masterSM = n.masters[i].GetStateMachine()
+		if !n.cfg.followerMode {
+			groupCfg.leaderSM = n.leader.GetStateMachine()
 		}
 		if n.groups[i], err = newGroup(groupCfg, n.network, n.storage.GetStorage(i)); err != nil {
-			log.Errorf("Node create group[%d] error: %v.", i, err)
+			log.Errorf("Node %d create group[%d] error: %v.", n.cfg.id, i, err)
 			return nil, err
 		}
 	}
 	n.SetMembers()
 	n.SetMaxLogCount(cfg.MaxLogCount)
+
+	n.AddStateMachine(0, n.kvstore)
 
 	return
 }
@@ -280,7 +316,6 @@ func (n *node) Start() (err error) {
 		}
 	}()
 
-	//n.wg.Add(1)
 	ready := make(chan struct{})
 	go func() {
 		if err := n.storage.Open(ctx, n.NotifyStop()); err != nil {
@@ -300,16 +335,14 @@ func (n *node) Start() (err error) {
 
 		log.Debug("Node groups started.")
 
-		if n.cfg.enableElection && !n.cfg.followerMode {
-			for i, master := range n.masters {
-				if err := master.Start(ctx, n.NotifyStop()); err != nil {
-					log.Errorf("Node %d start master %d error: %v.", n.cfg.id, i, err)
-					n.errChan <- err
-					return
-				}
+		if !n.cfg.followerMode {
+			if err := n.leader.Start(n.NotifyStop()); err != nil {
+				log.Errorf("Node %d start leader error: %v.", n.cfg.id, err)
+				n.errChan <- err
+				return
 			}
 		}
-		log.Debug("Node masters started.")
+		log.Debug("Node leader started.")
 		close(ready)
 	}()
 
@@ -325,8 +358,14 @@ func (n *node) Start() (err error) {
 
 func (n *node) Serve() {
 	defer n.stop()
+	util.AddHook(n.Stop)
+
 	n.network.Start(n.NotifyStop())
+	log.Debug("Node peer network started.")
+
+	n.httpSvc.Start(n.errChan)
 	log.Debugf("Node %d ready to serve.", n.cfg.id)
+	n.ready = true
 
 	select {
 	case <-n.stopped:
@@ -338,15 +377,22 @@ func (n *node) Serve() {
 
 func (n *node) stop() {
 	n.stopping = true
-	for _, master := range n.masters {
-		master.Stop()
+	n.ready = false
+
+	if n.httpSvc != nil {
+		n.httpSvc.Stop()
 	}
-	log.Debug("Node masters stopped.")
+	log.Debug("node http service stopped.")
+
+	if n.leader != nil {
+		n.leader.Stop()
+	}
+	log.Debug("Node leader stopped.")
 
 	if n.network != nil {
 		n.network.StopServer()
 	}
-	log.Debug("Node network server stopped.")
+	log.Debug("Node peer network server stopped.")
 
 	for _, group := range n.groups {
 		group.Stop()
@@ -356,15 +402,18 @@ func (n *node) stop() {
 	if n.network != nil {
 		n.network.StopClient()
 	}
-	log.Debug("Node network client stopped.")
+	log.Debug("Node peer network client stopped.")
 
 	if n.storage != nil {
 		n.storage.Close()
 	}
 	log.Debug("Node storage stopped.")
-	//for _, batch := range n.batches {
-	//	batch
-	//}
+
+	if n.kvstore != nil {
+		n.kvstore.Close()
+	}
+	log.Debug("Node kvstore stopped.")
+
 	close(n.done)
 }
 
@@ -390,7 +439,7 @@ func (n *node) ReceiveMessage(b []byte) {
 		return
 	}
 	var groupID uint16
-	if err := comm.BytesToObject(b[:comm.GroupIDLen], &groupID); err != nil {
+	if err := util.BytesToObject(b[:comm.GroupIDLen], &groupID); err != nil {
 		log.Errorf("Node receive message convert byte to group id error: %v.", err)
 		return
 	}
@@ -417,8 +466,14 @@ func (n *node) ProposeWithCtxTimeout(ctx context.Context, groupID uint16, smid u
 	if n.stopping {
 		return errNodeStopping
 	}
+	if !n.ready {
+		return errNodeNotReady
+	}
 	if !n.checkGroupID(groupID) {
 		return errGroupOutRange
+	}
+	if smid != comm.LeaderStateMachineID && !n.IsLeader() {
+		return errNotLeader
 	}
 	if d < minProposeTimeout || d > maxProposeTimeout {
 		return fmt.Errorf("propose timeout invalid: %v", d)
@@ -441,36 +496,6 @@ func (n *node) ProposeWithCtxTimeout(ctx context.Context, groupID uint16, smid u
 	}
 }
 
-func (n *node) BatchPropose(groupID uint16, smid uint32, value []byte, batch uint32) error {
-	return n.BatchProposeWithTimeout(groupID, smid, value, batch, n.cfg.proposeTimeout)
-}
-func (n *node) BatchProposeWithTimeout(groupID uint16, smid uint32, value []byte, batch uint32, d time.Duration) error {
-	if n.stopping {
-		return errNodeStopping
-	}
-	if !n.checkGroupID(groupID) {
-		return errGroupOutRange
-	}
-	if d < minProposeTimeout || d > maxProposeTimeout {
-		return fmt.Errorf("propose timeout invalid: %v", d)
-	}
-	ctx := context.WithValue(context.Background(), "batch", batch)
-	ctx, cancel := context.WithTimeout(ctx, d)
-	defer cancel()
-
-	result, err := n.groups[groupID].BatchPropose(ctx, smid, value, batch)
-	if err != nil {
-		return err
-	}
-
-	select {
-	case <-ctx.Done():
-		return ctx.Err()
-	case r := <-result:
-		return r.Err
-	}
-}
-
 func (n *node) GetCurrentInstanceID(groupID uint16) (uint64, error) {
 	if !n.checkGroupID(groupID) {
 		return 0, errGroupOutRange
@@ -482,16 +507,12 @@ func (n *node) GetNodeID() uint64 {
 	return n.cfg.id
 }
 
-func (n *node) GetNodeCount() int {
-	return n.groups[0].GetNodeCount()
+func (n *node) GetMemberCount() int {
+	return n.groups[0].GetMemberCount()
 }
 
 func (n *node) GetGroupCount() int {
 	return n.cfg.groupCount
-}
-
-func (n *node) IsEnableMemberShip() bool {
-	return n.cfg.enableMemberShip
 }
 
 func (n *node) IsFollower() bool {
@@ -549,19 +570,21 @@ func (n *node) SetMembers() {
 	}
 }
 
-func (n *node) AddMember(groupID uint16, ip string, port int) error {
-	if !n.checkGroupID(groupID) {
-		return errGroupOutRange
+func (n *node) AddMember(member comm.Member) error {
+	if n.stopping {
+		return errNodeStopping
+	}
+	if !n.ready {
+		return errNodeNotReady
+	}
+	if !n.IsLeader() {
+		return errNotLeader
 	}
 
-	nodeID, err := network.AddrToUint64(ip, port)
-	if err != nil {
-		return err
-	}
 	ctx, cancel := context.WithTimeout(context.Background(), n.cfg.proposeTimeout)
 	defer cancel()
 
-	result, err := n.groups[groupID].AddMember(ctx, nodeID, fmt.Sprintf("%s:%d", ip, port))
+	result, err := n.groups[0].AddMember(ctx, member)
 	if err != nil {
 		return err
 	}
@@ -573,18 +596,20 @@ func (n *node) AddMember(groupID uint16, ip string, port int) error {
 	}
 }
 
-func (n *node) RemoveMember(groupID uint16, ip string, port int) error {
-	if !n.checkGroupID(groupID) {
-		return errGroupOutRange
+func (n *node) RemoveMember(member comm.Member) error {
+	if n.stopping {
+		return errNodeStopping
 	}
-	nodeID, err := network.AddrToUint64(ip, port)
-	if err != nil {
-		return err
+	if !n.ready {
+		return errNodeNotReady
+	}
+	if !n.IsLeader() {
+		return errNotLeader
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), n.cfg.proposeTimeout)
 	defer cancel()
 
-	result, err := n.groups[groupID].RemoveMember(ctx, nodeID)
+	result, err := n.groups[0].RemoveMember(ctx, member)
 	if err != nil {
 		return err
 	}
@@ -596,22 +621,20 @@ func (n *node) RemoveMember(groupID uint16, ip string, port int) error {
 	}
 }
 
-func (n *node) ChangeMember(groupID uint16, dstip string, dstport int, srcip string, srcport int) error {
-	if !n.checkGroupID(groupID) {
-		return errGroupOutRange
+func (n *node) UpdateMember(dst, src comm.Member) error {
+	if n.stopping {
+		return errNodeStopping
 	}
-	dst, err := network.AddrToUint64(dstip, dstport)
-	if err != nil {
-		return err
+	if !n.ready {
+		return errNodeNotReady
 	}
-	src, err := network.AddrToUint64(srcip, srcport)
-	if err != nil {
-		return err
+	if !n.IsLeader() {
+		return errNotLeader
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), n.cfg.proposeTimeout)
 	defer cancel()
 
-	result, err := n.groups[groupID].ChangeMember(ctx, dst, fmt.Sprintf("%s:%d", dstip, dstport), src)
+	result, err := n.groups[0].UpdateMember(ctx, dst, src)
 	if err != nil {
 		return err
 	}
@@ -623,70 +646,30 @@ func (n *node) ChangeMember(groupID uint16, dstip string, dstport int, srcip str
 	}
 }
 
-//func (n *node) ShowMemberShip(groupID uint16) error {
-//	if !n.checkGroupID(groupID) {
-//		return errGroupOutRange
-//	}
-//	return nil
-//}
-//
-//func (n *node) GetMasterNode(groupID uint16) (Node, error) {
-//	if !n.checkGroupID(groupID) {
-//		return nil, fmt.Errorf("group %d out of range", groupID)
-//	}
-//	return n.masters[groupID], nil
-//}
-//
-//func (n *node) MasterNodeWithVersion(groupID uint16, version uint64) Node {
-//	if !n.checkGroupID(groupID) {
-//		return errGroupOutRange
-//	}
-//	return nil
-//}
-//
-//func (n *node) IsMasterNode(groupID uint16) bool {
-//	if !n.checkGroupID(groupID) {
-//		return errGroupOutRange
-//	}
-//	return false
-//}
-
-func (n *node) SetElectionTimeout(groupID uint16, d time.Duration) error {
-	if !n.checkGroupID(groupID) {
-		return errGroupOutRange
-	}
-	n.masters[groupID].SetElectionTimeout(d)
-	return nil
+func (n *node) GetMembers() (map[uint64]comm.Member, error) {
+	return n.groups[0].GetMembers()
 }
 
-func (n *node) GiveUpElection(groupID uint16) error {
-	if !n.checkGroupID(groupID) {
-		return errGroupOutRange
-	}
-	n.masters[groupID].GiveUp()
-	return nil
+func (n *node) GetLeader() comm.Member {
+	return n.leader.GetLeader()
 }
 
-func (n *node) SetMaxHoldThreads(groupID uint16, count uint) error {
-	return nil
+func (n *node) IsLeader() bool {
+	return n.leader.IsLeader()
 }
 
-func (n *node) SetProposeWaitTimeThreshold(groupID uint16, duration time.Duration) error {
-	return nil
+func (n *node) SetElectionTimeout(d time.Duration) {
+	n.leader.SetElectionTimeout(d)
+}
+
+func (n *node) GiveUpElection() {
+	n.leader.GiveUp()
 }
 
 func (n *node) SetSync(groupID uint16, sync bool) error {
 	if !n.checkGroupID(groupID) {
 		return errGroupOutRange
 	}
-	return nil
-}
-
-func (n *node) SetBatchCount(groupID uint16, count int) error {
-	return nil
-}
-
-func (n *node) SetBatchDelayTime(groupID uint16, duration time.Duration) error {
 	return nil
 }
 
