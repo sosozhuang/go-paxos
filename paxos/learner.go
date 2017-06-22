@@ -19,7 +19,7 @@ import (
 	"github.com/sosozhuang/paxos/checkpoint"
 	"github.com/sosozhuang/paxos/comm"
 	"github.com/sosozhuang/paxos/logger"
-	"github.com/sosozhuang/paxos/store"
+	"github.com/sosozhuang/paxos/storage"
 	"github.com/sosozhuang/paxos/util"
 	"math"
 	"sync"
@@ -75,12 +75,12 @@ type learner struct {
 	cps                Sender
 	cpr                checkpoint.Receiver
 	tp                 Transporter
-	st                 store.Storage
+	st                 storage.Storage
 	sender             sender
 	token chan struct{}
 }
 
-func newLearner(groupCfg comm.GroupConfig, instance Instance, tp Transporter, st store.Storage,
+func newLearner(groupCfg comm.GroupConfig, instance Instance, tp Transporter, st storage.Storage,
 	acceptor Acceptor, cpm checkpoint.CheckpointManager) Learner {
 	learner := &learner{
 		acceptor: acceptor,
@@ -133,12 +133,12 @@ func (l *learner) setInstanceID(id uint64) {
 }
 
 func (l *learner) getLastSeenInstanceID() uint64 {
-	return l.lastSeenInstanceID
+	return atomic.LoadUint64(&l.lastSeenInstanceID)
 }
 
 func (l *learner) setLastSeenInstanceID(instanceID, nodeID uint64) {
-	if instanceID > l.lastSeenInstanceID {
-		l.lastSeenInstanceID = instanceID
+	if instanceID > l.getLastSeenInstanceID() {
+		atomic.StoreUint64(&l.lastSeenInstanceID, instanceID)
 		l.lastSeenNodeID = nodeID
 	}
 }
@@ -319,7 +319,7 @@ func (l *learner) onAskForLearn(msg *comm.PaxosMsg) {
 					llog.Errorf("Learner get instance id %d value error: %v.", msg.GetInstanceID(), err)
 					return
 				}
-				var state comm.AcceptorStateData
+				var state comm.AcceptorState
 				if err = proto.Unmarshal(value, &state); err != nil {
 					llog.Errorf("Learner unmarshal instance id %d value error: %v.", msg.GetInstanceID(), err)
 					return
@@ -360,14 +360,14 @@ func (l *learner) sendInstanceID(instanceID, nodeID uint64) {
 		MinChosenInstanceID: proto.Uint64(l.cpm.GetMinChosenInstanceID()),
 	}
 	if l.getInstanceID()-instanceID > 50 {
-		cp, err := l.groupCfg.GetSystemCheckpoint()
+		ccp, err := l.groupCfg.GetClusterCheckpoint()
 		if err == nil {
-			msg.SystemVar = cp
+			msg.ClusterInfo = ccp
 
 		}
-		cp, err = l.groupCfg.GetMasterCheckpoint()
+		lcp, err := l.groupCfg.GetLeaderCheckpoint()
 		if err == nil {
-			msg.MasterVar = cp
+			msg.LeaderInfo = lcp
 		}
 	}
 	if err := l.tp.send(nodeID, comm.MsgType_Paxos, msg); err != nil {
@@ -378,11 +378,11 @@ func (l *learner) sendInstanceID(instanceID, nodeID uint64) {
 func (l *learner) onSendInstanceID(msg *comm.PaxosMsg) {
 	l.setLastSeenInstanceID(msg.GetCurInstanceID(), msg.GetNodeID())
 
-	if len(msg.GetSystemVar()) > 0 {
-		l.groupCfg.UpdateSystemByCheckpoint(msg.GetSystemVar())
+	if len(msg.GetClusterInfo()) > 0 {
+		l.groupCfg.UpdateClusterByCheckpoint(msg.GetClusterInfo())
 	}
-	if len(msg.GetMasterVar()) > 0 {
-		l.groupCfg.UpdateMasterByCheckpoint(msg.GetMasterVar())
+	if len(msg.GetLeaderInfo()) > 0 {
+		l.groupCfg.UpdateLeaderByCheckpoint(msg.GetLeaderInfo())
 	}
 
 	if msg.GetInstanceID() != l.getInstanceID() {
@@ -405,7 +405,7 @@ func (l *learner) isLearned() bool {
 }
 
 func (l *learner) isReadyForNewValue() bool {
-	return l.getInstanceID()+1 >= l.lastSeenInstanceID
+	return l.getInstanceID()+1 >= l.getLastSeenInstanceID()
 }
 
 func (l *learner) getChecksum() uint32 {
@@ -546,7 +546,7 @@ type learnerState struct {
 	checksum uint32
 	learned  bool
 	value    []byte
-	st       store.Storage
+	st       storage.Storage
 }
 
 func (l *learnerState) reset() {
@@ -567,7 +567,7 @@ func (l *learnerState) learnAndSave(instanceID uint64, b ballot, value []byte, c
 	} else if len(l.value) > 0 {
 		l.checksum = util.UpdateChecksum(crc, l.value)
 	}
-	state := &comm.AcceptorStateData{
+	state := &comm.AcceptorState{
 		InstanceID:     proto.Uint64(instanceID),
 		AcceptedValue:  l.value,
 		PromisedID:     proto.Uint64(b.proposalID),
@@ -599,7 +599,7 @@ type sender struct {
 	ackInstanceID   uint64
 	wg              sync.WaitGroup
 	mu              sync.Mutex
-	st              store.Storage
+	st              storage.Storage
 }
 
 func (s *sender) isPrepared() bool {
@@ -726,7 +726,7 @@ func (s *sender) sendValue(instanceID, nodeID uint64, checksum uint32) (uint32, 
 	if err != nil {
 		return checksum, err
 	}
-	var state comm.AcceptorStateData
+	var state comm.AcceptorState
 	if err = proto.Unmarshal(value, &state); err != nil {
 		return checksum, err
 	}

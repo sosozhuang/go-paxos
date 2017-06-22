@@ -217,8 +217,8 @@ func (p *proposer) broadcastPrepareMessage(ctx context.Context, msg *comm.PaxosM
 	cid := ctx.Value("instance_id").(uint64)
 	if cid != msg.GetInstanceID() {
 		plog.Debugf("In prepare, instance id changed from %d to %d.", cid, msg.GetInstanceID())
-		p.instance.NewValue(ctx)
-		return
+		//p.instance.NewValue(ctx)
+		//return
 	}
 
 	p.wg.Add(1)
@@ -373,8 +373,8 @@ func (p *proposer) broadcastAcceptMessage(ctx context.Context, msg *comm.PaxosMs
 	cid := ctx.Value("instance_id").(uint64)
 	if cid != msg.GetInstanceID() {
 		plog.Debugf("In accept, instance id changed from %d to %d.", cid, msg.GetInstanceID())
-		p.instance.NewValue(ctx)
-		return
+		//p.instance.NewValue(ctx)
+		//return
 	}
 
 	p.wg.Add(1)
